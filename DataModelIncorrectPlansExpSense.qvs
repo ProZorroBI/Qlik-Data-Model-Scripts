@@ -1,0 +1,679 @@
+﻿///$tab Main
+SET ThousandSep=' ';
+SET DecimalSep=',';
+SET MoneyThousandSep=' ';
+SET MoneyDecimalSep=',';
+SET MoneyFormat='# ##0,00 ₴;-# ##0,00 ₴';
+SET TimeFormat='h:mm:ss';
+SET DateFormat='DD.MM.YYYY';
+SET TimestampFormat='DD.MM.YYYY h:mm:ss[.fff]';
+SET FirstWeekDay=0;
+SET BrokenWeeks=1;
+SET ReferenceDay=0;
+SET FirstMonthOfYear=1;
+SET CollationLocale='ru-RU';
+SET MonthNames='січ;лют;бер;кві;тра;чер;лип;сер;вер;жов;лис;гру';
+SET LongMonthNames='Январь;Февраль;Март;Апрель;Май;Июнь;Июль;Август;Сентябрь;Октябрь;Ноябрь;Декабрь';
+SET DayNames='Пн;Вт;Ср;Чт;Пт;Сб;Вс';
+SET LongDayNames='понедельник;вторник;среда;четверг;пятница;суббота;воскресенье';
+
+
+LET vCurrentDate = Today(1);
+
+// Начальная дата пунктов планов
+// ТЗ https://docs.google.com/document/d/1aGYkaAMWBN3Vw2zffi1lnh32ZOBO7hZYfOeqTWdz9fE/edit
+LET vStartPlanPointDate = YearStart(AddYears(vCurrentDate, -1));
+
+// Начальная дата планов
+LET vStartPlanDate = MakeDate(2016, 1, 1);
+
+// Граничная дата планов
+LET vEndPlanDate = Floor(YearEnd(AddYears(vCurrentDate, 1)));
+
+// Текущий ГодМесяц
+LET vCurrentYearMonth = (Year('$(vCurrentDate)')-1) * 12 + Month('$(vCurrentDate)');
+
+SET vRootURL = 'https://prozorro.gov.ua/plan/';
+
+SET DIC_QVD_PATH = '..\04_DataBase\02_QVD_DB\01_Dictionary\';
+SET TRN_QVD_PATH = '..\04_DataBase\02_QVD_DB\02_Transaction\';
+
+// Расчет показателей некорректности планов 
+// ТЗ https://docs.google.com/document/d/1w3DBOla8BfxDObESvXTRH-UknnQO5EaW0g5X2kHiGvU/edit
+///$tab 1 Currency
+
+DIRECTORY $(TRN_QVD_PATH);
+
+Currency:
+LOAD Дата, 
+     Валюта as КодВалюти, 
+     Курс
+FROM Currency_*.qvd (qvd);
+
+// Курс до конца периода - до конца текущего месяца
+Currency_Tmp:
+LOAD 
+	 КодВалюти, 
+	 Max(Дата) as MaxDate 
+RESIDENT Currency 
+GROUP BY КодВалюти;
+
+LEFT JOIN (Currency_Tmp)
+LOAD 
+	 КодВалюти, 
+	 Дата as MaxDate, 
+	 Курс 
+RESIDENT Currency;
+
+Calendar_Tmp:
+LOAD Date('$(vStartPlanDate)' + RecNo() - 1) as Дата
+AutoGenerate Floor(MonthEnd('$(vCurrentDate)')) - '$(vStartPlanDate)' + 1;
+
+LEFT JOIN (Currency_Tmp)
+LOAD Дата
+RESIDENT Calendar_Tmp;
+
+DROP Table Calendar_Tmp;
+
+Concatenate(Currency)
+LOAD КодВалюти, 
+	 Курс,
+	 Дата
+RESIDENT Currency_Tmp
+WHERE Дата > MaxDate;
+
+DROP TABLE Currency_Tmp;  
+///$tab 2 Plans
+DIRECTORY $(TRN_QVD_PATH);
+
+// Для исключения процедур esco
+ExcludeProcedureType:
+LOAD * Inline [
+ExcludeProcedure
+esco
+closeFrameworkAgreementUA
+];
+
+
+PlanTmp:
+LOAD [ID пункту плану], 
+     PlanIdKey, 
+//     TestFlag, 
+     procurementMethod, 
+     procurementMethodType, 
+     Валюта, 
+     [Дата останньої зміни пункту плану], 
+     [Дата планованого оголошення], 
+     [Дата публікації пункту плану], 
+     [Ідентифікатор пункту плану], 
+     [Код організатора], 
+     [Код проекту], 
+     [Код реєстру організатора], 
+     [Майданчик плану], 
+     [Назва проекту], 
+     [Найменування організатора], 
+     [Номер плану закупівлі], 
+     Примітки, 
+     [Пункт плану], 
+//     Рік, 
+     [Сума пункту плану], 
+//     [Сума пункту плану без ПДВ], 
+     [Юридична назва організатора]
+FROM Plan_????.qvd (qvd)
+Where NOT Exists(ExcludeProcedure, procurementMethodType);
+
+DROP Table ExcludeProcedureType;
+
+Left Join (PlanTmp)
+LOAD
+	 PlanIdKey,
+	 (Year([Дата планованого оголошення])-1) * 12 + Month([Дата планованого оголошення]) as YearMonthNum,//[Рік-Місяць планованого оголошення], 
+	 Floor(MonthEnd([Дата планованого оголошення])) as MonthEndPublicDate
+Resident PlanTmp;	 
+
+Plan:
+NoConcatenate
+LOAD [ID пункту плану], 
+     PlanIdKey, 
+//     procurementMethod, 
+     procurementMethodType, 
+     Валюта, 
+     [Дата останньої зміни пункту плану], 
+     [Дата планованого оголошення],
+     YearMonthNum,
+     if(YearMonthNum < $(vCurrentYearMonth), MonthEndPublicDate, [Дата публікації пункту плану]) as ДатаКурсаВалют,
+     [Дата публікації пункту плану], 
+     [Ідентифікатор пункту плану], 
+     [Код організатора], 
+     [Код організатора] as  [Код організатора в планах],
+     [Код проекту], 
+     [Код реєстру організатора], 
+     [Майданчик плану], 
+     [Назва проекту], 
+     [Юридична назва організатора] as [Назва організатора у пункті плану], 
+     [Номер плану закупівлі], 
+     Примітки, 
+     [Пункт плану], 
+     [Сума пункту плану] as [Сума пункту плану_],
+     [Сума пункту плану] as [Сума пункту плану у валюті],
+     if([Сума пункту плану] = 0, 0, 1) as PlanStatus,
+     if([Сума пункту плану] >= 0, 'Коректна', 'Некоректна') as [Коректність вартості],
+     if([Сума пункту плану] < 0, 1) as Amount_Flag,
+     if(procurementMethod = '' OR IsNull(procurementMethod), 0, 1) as PZPublic,
+//     if(YearMonthNum = Year([Дата публікації пункту плану]) * 100 + Month([Дата публікації пункту плану]), 1, 
+//     	if(YearMonthNum < Year([Дата публікації пункту плану]) * 100 + Month([Дата публікації пункту плану]), 2,
+//     		if(YearMonthNum > Year([Дата публікації пункту плану]) * 100 + Month([Дата публікації пункту плану]), 3
+//     		)
+//     	)
+//     ) as PlanPubInTime,
+//     if([Дата публікації пункту плану] <> [Дата останньої зміни пункту плану], 1, 0) as PlanChangeFlag, //Дата публікації пункту плану != Дата останньої зміни пункту плану
+     RangeMax(
+     ( (Year([Дата планованого оголошення])-1)*12+Month([Дата планованого оголошення]) )-
+     ( (Year([Дата публікації пункту плану])-1)*12+Month([Дата публікації пункту плану]) ),
+     0) as [К-сть місяців з публікації до оголошення],
+     '$(vRootURL)'&[Ідентифікатор пункту плану] as PlanLink,
+     if(Year([Дата планованого оголошення])-Year([Дата публікації пункту плану]) >= 2, 'Занадто велика',
+     	if(Year([Дата планованого оголошення])-Year([Дата публікації пункту плану]) <= -2, 'Занадто мала', 
+     	'Схоже в нормі') ) as [Коректність планованої дати оголошення],
+     if(Year([Дата планованого оголошення])-Year([Дата публікації пункту плану]) >= 2 OR Year([Дата планованого оголошення])-Year([Дата публікації пункту плану]) <= -2, 1) as PubDate_Flag,
+//     if(IsNull([Юридична назва організатора]) OR Len([Юридична назва організатора]) < 4, 'Некоректна', 'Схоже в нормі') as [Коректність назви Організатора],	
+//     if(IsNull([Юридична назва організатора]) OR Len([Юридична назва організатора]) < 4, 1) as Organiser_Flag,
+	 if(IsNull([Пункт плану]) OR Len([Пункт плану]) < 3, 'Некоректна', 'Схоже в нормі') as [Коректність предмету закупівлі],
+	 if(IsNull([Пункт плану]) OR Len([Пункт плану]) < 3, 1) as Item_Flag
+//     2 as TrnType
+Resident PlanTmp
+Where //[Сума пункту плану] >= 0 AND IsNum([Сума пункту плану]) 
+//AND 
+[Дата публікації пункту плану]>='$(vStartPlanPointDate)' //AND [Дата планованого оголошення]<=$(vEndPlanDate) AND IsNum([Дата планованого оголошення]) 
+;
+
+DROP Table PlanTmp;  
+
+// Курсы валют в планах
+FOR Each vCurr in FieldValueList('КодВалюти') 	
+
+	Left Join (Plan)
+	LOAD 
+	 	Дата as ДатаКурсаВалют,
+	 	Курс as Curr$(vCurr)
+	Resident Currency
+	Where КодВалюти='$(vCurr)';	
+
+NEXT
+
+Left Join (Plan)
+LOAD
+	 PlanIdKey,
+	 Round(Floor(Pick(Match(Валюта, 'UAH', 'USD', 'EUR', 'RUB', 'GBP', 'RUR'), 
+	 [Сума пункту плану_], [Сума пункту плану_]*CurrUSD, [Сума пункту плану_]*CurrEUR, [Сума пункту плану_]*CurrRUB, [Сума пункту плану_]*CurrGBP, [Сума пункту плану_]*CurrRUB), 0.001), 0.01) as [Сума пункту плану],
+	 	 
+	 Round(Floor(Pick(Match(Валюта, 'UAH', 'USD', 'EUR', 'RUB', 'GBP', 'RUR'), 
+	 		[Сума пункту плану_]/CurrEUR, 
+	 		[Сума пункту плану_]*CurrUSD/CurrEUR, 
+	 		[Сума пункту плану_],
+	 		[Сума пункту плану_]*CurrRUB/CurrEUR, 
+	 		[Сума пункту плану_]*CurrGBP/CurrEUR,
+	 		[Сума пункту плану_]*CurrRUB/CurrEUR), 0.001), 0.01) as [Сума пункту плану (EUR)]
+Resident Plan;
+
+DROP Fields ДатаКурсаВалют, [Сума пункту плану_], CurrUSD, CurrEUR, CurrRUB, CurrGBP From Plan;   
+
+PlanItems_:
+LOAD 
+//	 [ID пункту плану Orig], 
+     PlanIdKey, 
+//     [ID товару], 
+//     PlanItemId, 
+//     [Кількість товарів], 
+//     [Код одиниці виміру], 
+//     [Назва одиниці виміру], 
+     [Назва предмета закупівлі], 
+     [Строк поставки] 
+FROM PlanItems_????.qvd (qvd);
+
+Left Join (Plan)
+LOAD
+	PlanIdKey,
+	(Year(Max([Строк поставки]))-1) * 12 + Month(Max([Строк поставки])) as DeliveryYearMonthNum, // [Рік-Місяць доставки]
+	Max([Строк поставки]) as DeliveryDate,
+	Concat(DISTINCT [Назва предмета закупівлі], ', ') as [Назва предмета закупівлі]
+Resident PlanItems_	
+Group By PlanIdKey;
+
+DROP Table PlanItems_;
+
+PlanAdditionalClassifications:
+LOAD 
+     PlanIdKey, 
+     [Код додаткового класифікатора плану], 
+     [Тип додаткового класифікатора плану] 
+FROM PlanAdditionalClassifications_????.qvd (qvd);
+
+DIRECTORY $(DIC_QVD_PATH);
+
+Left Join (PlanAdditionalClassifications)
+LOAD
+	 [Код класифікатора] as [Код додаткового класифікатора плану],
+	 1 as KEKVFlag
+FROM KEKV.qvd (qvd);
+
+Left Join (Plan)
+LOAD Distinct
+	 PlanIdKey,
+	 1 as PlanKEKVFlag
+Resident PlanAdditionalClassifications
+Where Match(Lower([Тип додаткового класифікатора плану]), 'kekv', 'кекв') AND KEKVFlag = 1;
+
+DROP Table PlanAdditionalClassifications;
+
+Left Join (Plan)
+LOAD 
+	 PlanIdKey, 
+	 Left([Пункт плану]&' | '&[Назва предмета закупівлі], 400) as [Пункт плану (розширений)],
+	 if(DeliveryYearMonthNum - YearMonthNum < 0, 'Менша за дату оголошення',
+	 	if((DeliveryYearMonthNum - YearMonthNum >= 0 AND DeliveryYearMonthNum - YearMonthNum < 18) OR IsNull(DeliveryYearMonthNum), 'Схоже в нормі', 'Значно більша за дату оголошення')
+	 ) as [Коректність дати доставки],
+	 if(DeliveryYearMonthNum - YearMonthNum < 0 OR NOT ((DeliveryYearMonthNum - YearMonthNum >= 0 AND DeliveryYearMonthNum - YearMonthNum < 18) OR IsNull(DeliveryYearMonthNum)), 1) as DeliverDate_Flag,
+	 if(PlanKEKVFlag = 1, 'Наявний', 'Відсутній') as [Наявність КЕКВ],
+	 if(PlanKEKVFlag <> 1, 1) as KEKV_Flag
+Resident Plan;	 
+
+DROP Fields [Назва предмета закупівлі], PlanKEKVFlag;
+
+Left Join (Plan)
+LOAD 
+	 PlanIdKey, 
+	 if(Match([Коректність дати доставки], 'Менша за дату оголошення', 'Значно більша за дату оголошення')
+	 OR [Коректність вартості] = 'Некоректна'
+	 OR Match([Коректність планованої дати оголошення], 'Занадто велика', 'Занадто мала')
+	 OR [Коректність предмету закупівлі] = 'Некоректна',
+//	 OR [Коректність назви Організатора] = 'Некоректна', 
+	 'Некоректний', 'Схоже коректний') as [Коректність пункту плану]
+Resident Plan;	 
+
+DIRECTORY $(TRN_QVD_PATH);
+
+//Left Join (Plan)
+//LOAD 
+////	 [ID пункту плану Orig], 
+//     PlanIdKey, 
+//     [Код класифікатора плану] as [Код класифікатора CPV], 
+////     [Назва коду класифікатора плану], 
+//     [Тип класифікатора плану] 
+////     TestFlag
+//FROM PlanClassification.qvd (qvd);
+
+// Организаторы из планов
+// ТЗ https://docs.google.com/document/d/1TwX8eBomER8wKOQ-lPfuyEGYmz6cM-oLYRtEnhIyRWg
+PlanOrganisers:
+LOAD
+	 [Код організатора в планах],
+	 LastValue([Назва організатора у пункті плану]) as [Організатор в планах]
+Resident Plan
+Group By [Код організатора в планах]
+Order By [Дата публікації пункту плану];	 
+///$tab 5 Dictionaries
+// Добавление в справочник CPV "Не вказано"
+//Concatenate (CPVClassification)
+//LOAD * Inline [
+//Код класифікатора CPV, 	Підрозділ CPV, 	Група CPV, 		Клас CPV, 		Підрозділи, 	Групи, 			Класи, 			Категорії, 		Підкатегорії, 	Класифікація CPV, 	Ієрархія CPV
+//other,					Не вказано,	  	Не вказано,		Не вказано,		Не вказано,		Не вказано,		Не вказано,		Не вказано,		Не вказано,		Не вказано,			Не вказано
+//];
+
+[Відсутній КЕКВ]:
+LOAD * Inline [
+KEKV_Flag, Відсутній КЕКВ
+1,		   Відсутній КЕКВ	
+];
+
+//[Некоректна назва Організатора]:
+//LOAD * Inline [
+//Organiser_Flag, Некоректна назва Організатора
+//1,				Некоректна назва Організатора
+//];
+
+[Некоректний предмет закупівлі]:
+LOAD * Inline [
+Item_Flag, Некоректний предмет закупівлі
+1,		   Некоректний предмет закупівлі
+];
+
+[Некоректна очікувана вартість]:
+LOAD * Inline [
+Amount_Flag, Некоректна очікувана вартість
+1,			 Некоректна очікувана вартість
+];
+
+[Некоректна дата оголошення]:
+LOAD * Inline [
+PubDate_Flag, Некоректна дата оголошення
+1,			  Некоректна дата оголошення
+];
+
+[Некоректна дата доставки]:
+LOAD * Inline [
+DeliverDate_Flag, Некоректна дата доставки
+1,			  	  Некоректна дата доставки
+];
+
+DIRECTORY $(DIC_QVD_PATH);
+
+// Mapping
+RegionMap:
+Mapping
+LOAD DBRegion, 
+     RightRegion
+FROM RegionMap.qvd (qvd);
+
+CityMap:
+Mapping
+LOAD DBCity, 
+     RightCity
+FROM CityMap.qvd (qvd);
+
+MAP [Регіон організатора] using RegionMap;
+MAP [Населений пункт організатора] using CityMap;
+
+// Статусы планов
+// ТЗ https://docs.google.com/spreadsheets/d/1EMDDWqIAPptqThCc8Arb-_1OIgTc6MFGpDMUuR1RwVk/edit#gid=1960968288
+PlanStatus:
+Left Keep (Plan)
+LOAD * Inline [
+PlanStatus, Статус пункту плану, Status of Plan
+0,			Виключений,			 Excluded
+1,			Актуальний,			 Actually
+];
+
+//// Публикация в ПроЗорро
+//PZPublic:
+//Left Keep (Plan)
+//LOAD * Inline [
+//PZPublic, Публікація в Прозорро, 		Public in Prozorro
+//1,		  Із публікацією у Прозорро,	With publication in Prozorro
+//0,		  Без публікації у Прозорро,	Without publication in Prozorro
+//];
+
+
+// Процедура закупки
+PlanProcurementMethodType:
+Left Keep (Plan)
+LOAD * Inline [
+procurementMethodType, 		Процедура закупівлі, 									Procurement procedure,				Допороговість,	Thresholdness, 		Конкурентність, Competitiveness
+belowThreshold,				Допорогові закупівлі,									Below threshold,					Допороги,		Below Threshold,	Конкурентні,	Competitive
+aboveThresholdUA,			Відкриті торги,											Above threshold UA,					Надпороги,		Above Threshold,	Конкурентні,	Competitive
+aboveThresholdEU,			Відкриті торги з публікацією англійською мовою,			Above threshold EU,					Надпороги,		Above Threshold,	Конкурентні,	Competitive
+reporting,					Звіт про укладений договір,								Reporting,							Допороги,		Below Threshold,	Неконкурентні,	Noncompetitive
+negotiation,				Переговорна процедура,									Negotiation,						Надпороги,		Above Threshold,	Неконкурентні,	Noncompetitive
+negotiation.quick,			Переговорна процедура скорочена,						Quick Negotiation,					Надпороги,		Above Threshold,	Неконкурентні,	Noncompetitive
+,							Без застосування електронної системи,					Without using electronic system,	Допороги,		Below Threshold,	Неконкурентні,	Noncompetitive
+aboveThresholdUA.defense,	Переговорна процедура для потреб оборони,				Defense open tender,				Надпороги,		Above Threshold,	Конкурентні,	Competitive
+competitiveDialogueUA,		Конкурентний діалог,									Competitive dialogue UA,			Надпороги,		Above Threshold,	Конкурентні,	Competitive
+competitiveDialogueEU,		Конкурентний діалог з публікацією англійською мовою,	Competitive dialogue EU,			Надпороги,		Above Threshold,	Конкурентні,	Competitive
+];
+
+//// Своевременность публикации пункта плана
+//PubInTime:
+//LOAD * Inline [
+//PlanPubInTime, Вчасність публікації пункту плану, Plan Public in Time
+//1,			   В місяць оголошення,				  In month of the announcement
+//2,			   Після місяця оголошення,			  After month of the announcement
+//3,			   До місяця оголошення,			  Befor month of the announcement
+//];	 
+
+SET UpdField = if(IsNull($1) OR $1='', $2, $1);
+
+Organisers:
+LOAD
+	 IDOrganizatorOrig,
+	 IDOrganizatorOrig as [Код організатора], 
+     $(UpdField(ГородОрганизатора, 'Не знайдено відповідника')) as [Населений пункт організатора], 
+     $(UpdField(РегионОрганизатора, 'Не знайдено відповідника')) as [Регіон організатора], 
+     $(UpdField(Организатор, 'Не знайдено відповідника')) as [Назва організатора],
+     $(UpdField(Организатор, 'Не знайдено відповідника'))&' | '&IDOrganizatorOrig as [Назва організатора|Код організатора],
+     $(UpdField(Organiser, 'No matching')) as Organiser,
+     $(UpdField(ТелефонОрганизатора, 'Не знайдено відповідника')) as [Телефон організатора],
+	 $(UpdField(ИндексОрганизатора, 'Не знайдено відповідника')) as [Індекс організатора],
+	 $(UpdField(EmailОрганизатора, 'Не знайдено відповідника')) as [Email організатора],
+	 $(UpdField(ПредставительОрганизатора, 'Не знайдено відповідника')) as [Представник організатора],
+	 $(UpdField(АдресОрганизатора, 'Не знайдено відповідника')) as [Адреса організатора],
+	 if(WildMatch(Lower(ГородОрганизатора), '*київ', '*киев') AND NOT WildMatch(Lower(ГородОрганизатора), '*киликиїв*'), 1, 0) as UAOrgCapital;
+LOAD 
+	 IDOrganizatorOrig, 
+     ГородОрганизатора, 
+     РегионОрганизатора, 
+     Организатор,
+     Organiser,
+     ТелефонОрганизатора,
+	 ИндексОрганизатора,
+	 EmailОрганизатора,
+	 ПредставительОрганизатора,
+	 АдресОрганизатора 
+FROM Organizator_P.qvd (qvd)
+Where Exists([Код організатора], IDOrganizatorOrig);
+
+// Дополнение общего справочника Организаторов из Организаторов в планах
+Concatenate (Organisers)
+LOAD
+	 [Код організатора в планах] as [Код організатора],
+	 [Організатор в планах] as [Назва організатора],
+	 [Організатор в планах]&' | '&[Код організатора в планах] as [Назва організатора|Код організатора],
+	 'Не знайдено відповідника' as [Населений пункт організатора],
+	 'Не знайдено відповідника' as [Регіон організатора],
+	 'Не знайдено відповідника' as [Телефон організатора],
+	 'Не знайдено відповідника' as [Індекс організатора],
+	 'Не знайдено відповідника' as [Email організатора],
+	 'Не знайдено відповідника' as [Представник організатора],
+	 'Не знайдено відповідника' as [Адреса організатора],
+	 'No matching' as [Organiser],
+	 0 as UAOrgCapital
+Resident PlanOrganisers
+Where NOT Exists(IDOrganizatorOrig, [Код організатора в планах]);	 
+
+DROP Field IDOrganizatorOrig;
+
+
+// Иерархия Организаторов
+HierarchyOrganisers:
+LOAD 
+     IDOrganizator,
+     IDOrganizator as [Код організатора], 
+     [Краткое название] as [Коротка назва], 
+     [Главный орган] as [Головний орган], 
+     [Второстепенный орган] as [Другорядний орган],
+//     [Менеджер],
+     [Short name],
+     [Secondary agency],
+     [Head agency]
+FROM HierarchyOrganizator.qvd (qvd)
+Where Exists([Код організатора], IDOrganizator);
+
+Concatenate (HierarchyOrganisers)
+LOAD
+	[Назва організатора] as [Головний орган],
+	[Назва організатора] as [Другорядний орган],
+	[Назва організатора] as [Коротка назва],
+	Organiser as [Head agency],
+	Organiser as [Secondary agency],
+	Organiser as [Short name],
+	[Код організатора]
+Resident 	Organisers
+Where NOT Exists(IDOrganizator, [Код організатора]);
+
+DROP Field IDOrganizator;
+
+//PlanPubMonthStatus:
+//LOAD * Inline [
+//FM,	Статус місяця планованого оголошення, 	Month Status of Planned Announcement
+//0,	Незавершений місяць,					Unfinished month
+//1,	Завершений місяць,						Finished month
+//];
+//
+//// Координаты областей
+//RegionCoordinates:
+//LOAD Region as [Регіон організатора], 
+//	 RegionEN as [Organiser region],
+//	 '[['&Replace(Coordinates, ' ', '],[')&']]' as Coordinates
+//FROM
+//RegionCoordinates.qvd (qvd);
+//
+//// Перевод
+//PlanTranslations:
+//LOAD Index, 
+//     UA, 
+//     EN
+//FROM
+////[https://docs.google.com/spreadsheets/u/0/d/1YEfbJb-6wABcE_m02eWTmdyRf73P3GEuZomYlZGL-70/export?format=xlsx] // Загрузка из источника
+////(ooxml, embedded labels, table is Dictionary)
+////Where NOT IsNull(Index);
+//PlanTranslations.qvd (qvd);
+//
+//Language:
+//CROSSTABLE (Language, Translation) LOAD 
+//	 Index, 
+//     UA, 
+//     EN
+//RESIDENT PlanTranslations;
+//
+//
+//LanguageListTmp:
+//LOAD Distinct
+//	 Language as _Language
+//RESIDENT Language
+//WHERE Language > 0;
+//
+//LanguageList:
+//Load
+//	 RecNo() as _Index,
+//     _Language
+//Resident LanguageListTmp;
+//
+//Drop Table LanguageListTmp;
+//
+//DROP TABLE PlanTranslations;
+///$tab 6 Calendar
+
+// Год-Месяц доставки
+MinMaxDeliveryDates:
+LOAD 
+	Min(DeliveryDateTmp) as MinDeliveryDate,
+	Max(DeliveryDateTmp) as MaxDeliveryDate;	
+
+LOAD Num(Fieldvalue('DeliveryDate',RecNo())) as DeliveryDateTmp 
+       AUTOGENERATE FieldValueCount('DeliveryDate'); 
+
+LET vMinDeliveryDate = Peek('MinDeliveryDate', -1, 'MinMaxDeliveryDates');
+LET vMaxDeliveryDate = Peek('MaxDeliveryDate', -1, 'MinMaxDeliveryDates');
+
+DROP Tables MinMaxDeliveryDates; 
+
+DeliveryCalendar:
+LOAD Distinct
+	(Year(DeliveryDate_)-1) * 12 + Month(DeliveryDate_) as DeliveryYearMonthNum,
+    Dual(Year(DeliveryDate_)&'-'&Month(DeliveryDate_), (Year(DeliveryDate_)-1) * 12 + Month(DeliveryDate_)) as [Рік-Місяць доставки]    
+Where (DeliveryDate_>='$(vStartPlanDate)' AND Year(DeliveryDate_)<=Year('$(vCurrentDate)')) OR Exists(DeliveryDate, DeliveryDate_);
+
+LOAD Date('$(vMinDeliveryDate)' + RecNo() - 1) as DeliveryDate_
+AutoGenerate vMaxDeliveryDate - vMinDeliveryDate + 1;
+
+// Дата публикации пункта плана 
+MinMaxPlanPubDates:
+LOAD 
+	Min(PlanPubDateTmp) as MinPlanPubDate,
+	Max(PlanPubDateTmp) as MaxPlanPubDate;
+	
+LOAD Num(Fieldvalue('Дата публікації пункту плану',RecNo())) as PlanPubDateTmp 
+       AUTOGENERATE FieldValueCount('Дата публікації пункту плану');	
+
+LET vMinPlanPubDate = Peek('MinPlanPubDate', -1, 'MinMaxPlanPubDates');
+LET vMaxPlanPubDate = Peek('MaxPlanPubDate', -1, 'MinMaxPlanPubDates');
+
+DROP Tables MinMaxPlanPubDates; 
+
+PlanPubDateCalendar:
+LOAD Distinct
+	[Дата публікації пункту плану],
+    Dual(Year([Дата публікації пункту плану])&'-'&Month([Дата публікації пункту плану]), (Year([Дата публікації пункту плану])-1) * 12 + Month([Дата публікації пункту плану])) as [Рік-Місяць публікації пункту плану],
+    Dual(Year([Дата публікації пункту плану])&'-'&'К' & Ceil(Month([Дата публікації пункту плану])/3), Year([Дата публікації пункту плану]) & num(Ceil(Month([Дата публікації пункту плану])/3), '00')) as [Рік-Квартал публікації пункту плану],
+    Year([Дата публікації пункту плану]) as [Рік публікації пункту плану],
+    Month([Дата публікації пункту плану]) as [Місяць публікації пункту плану]     
+;
+
+LOAD Date('$(vMinPlanPubDate)' + RecNo() - 1) as [Дата публікації пункту плану]
+AutoGenerate vMaxPlanPubDate - vMinPlanPubDate + 1;
+
+// Дата планируемого объявления 
+MinMaxDates:
+LOAD 
+	Min(DateTmp) as MinDate,
+	Max(DateTmp) as MaxDate;
+	
+LOAD Num(Fieldvalue('Дата планованого оголошення',RecNo())) as DateTmp 
+       AUTOGENERATE FieldValueCount('Дата планованого оголошення');	
+
+LET vMinDate = Peek('MinDate', -1, 'MinMaxDates');
+LET vMaxDate = Peek('MaxDate', -1, 'MinMaxDates');
+
+DROP Tables MinMaxDates; 
+
+Calendar:
+LOAD Distinct
+	(Year(Date_)-1) * 12 + Month(Date_) as YearMonthNum,
+	Month(Date_) as [Місяць планованого оголошення],
+    Dual(Year(Date_)&'-'&Month(Date_), (Year(Date_)-1) * 12 + Month(Date_)) as [Рік-Місяць планованого оголошення],
+    'К' & Ceil(Month(Date_)/3) as [Квартал планованого оголошення], 
+    Dual(Year(Date_)&'-'&'К' & Ceil(Month(Date_)/3), Year(Date_) & num(Ceil(Month(Date_)/3), '00')) as [Рік-Квартал планованого оголошення],  
+    Year(Date_) as [Рік планованого оголошення],
+    if(InYearToDate(Date_, MonthEnd('$(vCurrentDate)'),0), 1, 0) AS CYD,     // флаг ToDate в текущем году
+    if(InYearToDate(Date_, MonthEnd('$(vCurrentDate)'),-1), 1, 0) AS PYD,     // флаг ToDate в предыдущем году  
+    if(InMonth(Date_, MonthEnd('$(vCurrentDate)'), 0) OR Date_>'$(vCurrentDate)', 0, 1) as FM // Статус месяца планированого объявления
+Where (Date_>='$(vStartPlanDate)' AND Year(Date_)<=Year('$(vCurrentDate)')) OR Exists([Дата планованого оголошення], Date_);
+
+LOAD Date('$(vMinDate)' + RecNo() - 1) as Date_
+AutoGenerate vMaxDate - vMinDate + 1;
+
+
+// ============== Англ. названия периодов ==============
+
+//SET MonthNames='Jan;Feb;Mar;Apr;May;Jun;Jul;Aug;Sep;Oct;Nov;Dec';
+//
+//Left Join (DeliveryCalendar)
+//LOAD Distinct
+//	Year(DeliveryDate_) * 100 + Month(DeliveryDate_) as DeliveryYearMonthNum,
+//    Dual(Year(DeliveryDate_)&'-'&Month(DeliveryDate_), Year(DeliveryDate_) * 100 + Month(DeliveryDate_)) as [Year-Month of Delivery]    
+//Where (DeliveryDate_>='$(vStartPlanDate)' AND Year(DeliveryDate_)<=Year('$(vCurrentDate)')) OR Exists(DeliveryDate, DeliveryDate_);
+//
+//LOAD Date('$(vMinDeliveryDate)' + RecNo() - 1) as DeliveryDate_
+//AutoGenerate vMaxDeliveryDate - vMinDeliveryDate + 1;
+
+DROP Field DeliveryDate;
+
+//Left Join (PlanPubDateCalendar)
+//LOAD Distinct
+//	[Дата публікації пункту плану],
+//    Dual(Year([Дата публікації пункту плану])&'-'&Month([Дата публікації пункту плану]), Year([Дата публікації пункту плану]) * 100 + Month([Дата публікації пункту плану])) as [Year-Month of Plan Public],
+//    Dual(Year([Дата публікації пункту плану])&'-'&'Q' & Ceil(Month([Дата публікації пункту плану])/3), Year([Дата публікації пункту плану]) & num(Ceil(Month([Дата публікації пункту плану])/3), '00')) as [Year-Quarter of Plan Public], 
+//	Month([Дата публікації пункту плану]) as [Month of Plan Public]
+//;
+//
+//LOAD Date('$(vMinPlanPubDate)' + RecNo() - 1) as [Дата публікації пункту плану]
+//AutoGenerate vMaxPlanPubDate - vMinPlanPubDate + 1;
+//
+//Left Join (Calendar)
+//LOAD Distinct
+//	Year(Date_) * 100 + Month(Date_) as YearMonthNum,
+//	Month(Date_) as [Month of Planned Announcement],
+//    Dual(Year(Date_)&'-'&Month(Date_), Year(Date_) * 100 + Month(Date_)) as [Year-Month of Planned Announcement],
+//    'Q' & Ceil(Month(Date_)/3) as [Quarter of Planned Announcement],
+//    Dual(Year(Date_)&'-'&'Q' & Ceil(Month(Date_)/3), Year(Date_) & num(Ceil(Month(Date_)/3), '00')) as [Year-Quarter of Planned Announcement]
+//Where (Date_>='$(vStartPlanDate)' AND Year(Date_)<=Year('$(vCurrentDate)')) OR Exists([Дата планованого оголошення], Date_);
+//
+//LOAD Date('$(vMinDate)' + RecNo() - 1) as Date_
+//AutoGenerate vMaxDate - vMinDate + 1;
+
+DROP Field [Дата планованого оголошення];
+///$tab Exit Script
+
+
+Exit Script;
+
+

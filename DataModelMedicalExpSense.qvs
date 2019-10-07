@@ -1,0 +1,4102 @@
+﻿///$tab Main
+// ТЗ https://docs.google.com/spreadsheets/d/1Jv2VMrYYX4XBxvQkYXN2b3TRAfS3GXzRKlmJh37VYm0/edit#gid=822979722
+SET ThousandSep=' ';
+SET DecimalSep=',';
+SET MoneyThousandSep=' ';
+SET MoneyDecimalSep=',';
+SET MoneyFormat='# ##0,00грн.;-# ##0,00грн.';
+SET TimeFormat='h:mm:ss';
+SET DateFormat='DD.MM.YYYY';
+SET TimestampFormat='DD.MM.YYYY h:mm:ss[.fff]';
+SET MonthNames='січ;лют;бер;кві;тра;чер;лип;сер;вер;жов;лис;гру';
+SET DayNames='Пн;Вт;Ср;Чт;Пт;Сб;Нд';
+
+// Для возможности поиска в этих полях
+NULLASVALUE Тендер, Лот, ОписаниеТендера, ОписаниеЛота; 
+
+// Загрузка реальных тендеров - 0, тестовых - 1
+SET vTestFlag = 0;
+
+LET vMinTenderDate = MakeDate(2015, 2, 4);
+
+LET vCurrentDate = Today(1);
+
+// Дата введения правила формирования справочника Участников
+LET vTendererRuleDate = MakeDate(2017, 10, 6);
+
+SET vProZorroURL = 'https://prozorro.gov.ua/tender/';
+
+//// Проверка на наличие обновленных данных
+DIRECTORY [..\04_DataBase\02_QVD_DB\01_Dictionary\];
+
+IF FileSize('ReloadModel.txt')>0 THEN
+
+	ReloadModel:
+	LOAD 
+		 ReloadModelFlag
+	FROM
+	ReloadModel.txt
+	(txt, utf8, embedded labels, delimiter is '\t', msq);
+	
+		IF  Peek('ReloadModelFlag', -1, 'ReloadModel') = 0 THEN
+			TRACE NO Updated data, EXIT with Error;
+			
+			ReloadModel:
+			LOAD 
+		 		FakeField
+			FROM ReloadModel.txt
+			(txt, utf8, embedded labels, delimiter is '\t', msq);
+			
+		ENDIF;
+	
+	DROP  Table ReloadModel;
+
+ENDIF;
+
+//// Флаг начала процесса перезагрузки модели - Запускается параллельно с осн. моделью, поэтому флаг не выставляется
+//StartControl:
+//LOAD
+//	 1 as StartControl
+//AutoGenerate 1;
+//
+//STORE StartControl into StartControl.txt (txt);	
+//DROP Table StartControl; 
+///$tab 1 Mapping
+DIRECTORY [..\04_DataBase\02_QVD_DB\01_Dictionary\];
+
+CountryMap:
+Mapping
+LOAD DBCountry, 
+     RightCountry
+FROM CountryMap.qvd (qvd);
+
+RegionMap:
+Mapping
+LOAD DBRegion, 
+     RightRegion
+FROM RegionMap.qvd (qvd);
+
+CityMap:
+Mapping
+LOAD DBCity, 
+     RightCity
+FROM CityMap.qvd (qvd);
+
+TendererMap:
+Mapping
+LOAD DBTenderer, 
+     RightTenderer
+FROM TendererMap.qvd (qvd);
+
+OrganizerMap:
+Mapping
+LOAD DBOrganizer, 
+     RightOrganizer
+FROM OrganizerMap.qvd (qvd);
+
+MAP СтранаУчастника, [Країна постачальника], СтранаОрганизатора, [Страна поставки] using CountryMap;
+MAP РегионУчастника, [Регіон постачальника], РегионОрганизатора, [Регион поставки] using RegionMap;
+MAP ГородУчастника, [Населений пункт постачальника], ГородОрганизатора, [Город поставки] using CityMap;
+MAP Участник, ИмяУчастника, ЮрНазваниеУчастника, Постачальник, [Представник постачальника], [Юр назва постачальника] using TendererMap;
+MAP Организатор, ПредставительОрганизатора, ЮрНазваниеОрганизатора using OrganizerMap;
+
+INNinNPMap:
+Mapping
+LOAD МНН as INN, 
+     '║'&[Належність до НП]&'║' as INNinNP
+FROM INNinNP.qvd (qvd);
+
+DRLZMap:
+Mapping
+LOAD Distinct
+	 [Торгівельне найменування] as SaleEqvt, 
+	 '║'&1&'║' as DRLZFlag
+FROM DRLZ.qvd (qvd);
+
+DRLZHomeoMap:
+Mapping
+LOAD Distinct
+	 [Торгівельне найменування] as HomeoEqvt, 
+     '║'&1&'║' as HomeoFlag
+FROM DRLZ.qvd (qvd)
+Where [Гомеопатичний ЛЗ] = 'Так';
+
+DRLZSaleVegMap:
+Mapping
+LOAD Distinct
+	 [Торгівельне найменування] as SaleVeg, 
+     '║'&1&'║' as SaleVegFlag
+FROM DRLZ.qvd (qvd)
+Where [ЛЗ рослинного походження] = 'Так';
+///$tab 2 Документы
+DIRECTORY [..\04_DataBase\02_QVD_DB\02_Transaction\];
+
+// ================= Тендеры ================= 
+Tender_Tmp:
+LOAD 
+//     Критерий, 
+//     [Конечная дата квалификации], 
+//     [Начальная дата квалификации],
+     [Конечная дата определения победителя], 
+     [Начальная дата определения победителя], 
+     [Начало квалификационного периода],
+	 [Конец квалификационного периода], 
+     ДатаИзмененияТендера, 
+     ТерминальнаяДатаТендера,
+     ОписаниеТендера, 
+//     description_en, 
+     [Конец периода уточнений], 
+     [Начало периода уточнений], 
+     IDTender, 
+     IDTenderOrig as ID,
+//     ШагУменьшения, 
+//     ШагУменьшенияВалюта, 
+//     ШагУменьшенияНДС, 
+     КоличествоПредложений, 
+     procurementMethod, 
+     procurementMethodType,
+     IDOrganizatorOrig as IDOrganizatorKey, 
+     СтатусТендера, 
+//     ТипТендера, 
+     Идентификатор, 
+//     ПлощадкаТендера,
+     [Конец приема предложений], 
+     [Начало приема предложений], 
+     Тендер, 
+     Title, 
+//     kind,
+//     ТендерРу,
+     СуммаТендера, 
+     ВалютаТендера, 
+//     НДСТендера,
+     [Обоснование использования метода],
+//	 cause,
+	 [Обоснование использования],
+//	 ВалютаГарантииПредложения, 
+//   СуммаГарантииПредложения, 
+//     [Начальная дата обжалования тендера], 
+//     [Конечная дата обжалования тендера],
+     Tender,
+     [Ключ донора]
+FROM Tender_????.qvd (qvd);
+
+// Определение переговорных процедур, которые должны быть загружены (исключаются переговорные без Award.Status=active)
+Award:
+LOAD IDAward as IDAwardKey,
+	 KeyLotBid, 
+	 IDTenderKey,
+     /*Timestamp(ДатаВремяЗакрытия) as*/ДатаВремяЗакрытия as ДатаПредложения, 
+     СтатусПротоколаОценки, 
+     IsLimitedAward
+FROM Award_????.qvd (qvd)
+Where Exists(IDTender, IDTenderKey);
+
+AwardStaus_Tmp:
+NoConcatenate
+LOAD KeyLotBid, 
+     LastValue(СтатусПротоколаОценки) as СтатусПротоколаОценки,
+     LastValue(IDTenderKey) as IDTenderKey,
+     LastValue(IDAwardKey) as IDAwardKey
+Resident Award
+Group By KeyLotBid
+Order By ДатаПредложения;
+
+Left Join (Award)
+LOAD
+	 IDAwardKey,
+	 1 as EndAwardStatusFlag
+Resident AwardStaus_Tmp;
+
+DROP Table AwardStaus_Tmp;
+
+Left Join (Tender_Tmp)
+LOAD 
+	 IDTenderKey as IDTender,
+	 Max(ДатаПредложения) as ДатаПредложения, 
+     1 as LoadLimFlag
+Resident Award
+Where EndAwardStatusFlag = 1 AND IsLimitedAward = 1 AND СтатусПротоколаОценки = 'active'
+Group By IDTenderKey;
+
+DROP Table Award;
+
+// Определение Тендеров и Лотов с мед. закупками
+TenderMedicalItemTmp:
+LOAD 
+	 IDItem,
+//	 IDTenderOrig, 
+     IDTenderKey as IDTenderMedicalKey, 
+//     IDLotOrig, 
+     IDLotKey as IDLot,
+     IDClassCPV 
+//     IDClassCPVKey
+FROM TenderItem_????.qvd (qvd);
+
+TenderMedicalItem_:
+NoConcatenate
+LOAD
+	 IDItem,
+	 IDTenderMedicalKey, 
+	 IDLot
+Resident TenderMedicalItemTmp
+Where WildMatch(IDClassCPV, '331*', '336*');
+
+DROP Table TenderMedicalItemTmp; 
+
+Tender_:
+NoConcatenate
+LOAD
+//	 Критерий, 
+//     Date([Конечная дата квалификации], '$(TimestampFormat)') as [Конечная дата квалификации], 
+//     Date(Floor([Конечная дата квалификации])) as [Дата квалификации],
+//     Date([Начальная дата квалификации], '$(TimestampFormat)') as [Начальная дата квалификации], 
+     Date([Конечная дата определения победителя], '$(TimestampFormat)') as [Конечная дата определения победителя], 
+     Date(Floor([Конечная дата определения победителя])) as [Дата определения победителя], 
+     Date([Начальная дата определения победителя]) as [Начальная дата определения победителя], 
+     Date([Начало квалификационного периода]) as [Начало квалификационного периода],
+	 Date([Конец квалификационного периода]) as [Конец квалификационного периода],
+     Date(ДатаИзмененияТендера, '$(TimestampFormat)') as ДатаИзмененияТендера, 
+     Date(ТерминальнаяДатаТендера, '$(TimestampFormat)') as ТерминальнаяДатаТендера,
+     ОписаниеТендера, 
+//     description_en, 
+     Date([Конец периода уточнений], '$(TimestampFormat)') as [Конец периода уточнений], 
+     Date(Floor([Конец периода уточнений])) as [Дата завершения периода уточнений],
+     Date([Начало периода уточнений], '$(TimestampFormat)') as [Начало периода уточнений], 
+//     Date(Floor([Начало периода уточнений])) as [Дата начала периода уточнений],
+//   if(IsNull([Начало периода уточнений]), Date(Date#(Mid(Идентификатор, 4, 10), 'YYYY-MM-DD')), Date(Floor([Начало периода уточнений]))) as [Дата объявления закупки],
+//   if(IsNull([Начало периода уточнений]), Date(Date#(Mid(Идентификатор, 4, 10), 'YYYY-MM-DD')), Date(Floor([Начало периода уточнений]))) as Дата,
+     if(procurementMethodType='reporting', Alt(Date(Floor(ТерминальнаяДатаТендера)), Date(Floor(ДатаПредложения))), 
+     	if(procurementMethodType Like 'negotiation*', Date(Floor(ДатаПредложения)),
+     		Alt( Date(Floor([Начало периода уточнений])), Date(Date#(Mid(Идентификатор, 4, 10), 'YYYY-MM-DD')) )
+     	)
+     ) as Дата,
+//     if(IsNull([Начальная дата определения победителя]), 0, 1) as IsStartQualifDate,
+//	 if(IsNull([Конечная дата определения победителя]), 0, 1) as IsEndQualifDate,
+     IDTender, 
+     IDTender as IDTenderKey, 
+     ID,
+//     ШагУменьшения as ШагУменьшения_,
+//     ШагУменьшения as ШагУменьшения_Валюта,
+//     ШагУменьшенияВалюта, 
+//     ШагУменьшенияНДС, 
+     КоличествоПредложений, 
+     procurementMethod,
+     if(procurementMethodType='reporting' AND [Обоснование использования метода]='catalogue', 'reportingECat', procurementMethodType) as procurementMethodType, 
+     IDOrganizatorKey, 
+     СтатусТендера, 
+//     ТипТендера, 
+     Идентификатор, 
+//     ПлощадкаТендера,
+     Date([Конец приема предложений], '$(TimestampFormat)') as [Конец приема предложений], 
+     Date(Floor([Конец приема предложений])) as [Дата завершения подачи предложений],
+     Date(Floor([Начало приема предложений])) as [Дата начала подачи предложений],
+     Date([Начало приема предложений], '$(TimestampFormat)') as [Начало приема предложений], 
+     Тендер, 
+     Title, 
+//     if(IsNull(kind), 'from pilot project', kind) as kind,
+//     ТендерРу, 
+     СуммаТендера as СуммаТендера_, 
+//     СуммаТендера as СуммаТендера_Валюта,
+     ВалютаТендера, 
+//     НДСТендера,
+//     [Обоснование использования метода],
+//	 cause,
+//	 [Обоснование использования],
+//	 ВалютаГарантииПредложения, 
+//     СуммаГарантииПредложения as СуммаГарантииПредложения_, 
+//     СуммаГарантииПредложения as СуммаГарантииПредложения_Валюта,
+//     [Начальная дата обжалования тендера], 
+//     [Конечная дата обжалования тендера],
+     Tender,
+     [Ключ донора]
+Resident Tender_Tmp //	
+Where Exists(IDTenderMedicalKey, IDTender) AND NOT ((procurementMethodType Like 'negotiation*' AND LoadLimFlag <> 1) OR (procurementMethodType = 'reporting' AND СтатусТендера  <> 'complete') OR WildMatch(procurementMethodType, 'competitiveDialogueEU*', 'competitiveDialogueUA*', 'esco', 'closeFrameworkAgreement*'));
+
+DROP Table Tender_Tmp;	
+
+//  ================= Лоты =================
+Lot:
+LOAD СтатусЛота as СтатусЛота_,
+//	 СсылкаНаАукцион, 
+     IDTenderKey, 
+     IDLot,
+     IDLotOrig as IDLOT, 
+     IDLot as IDLotKey,
+     ИдентификаторЛота,
+     ОписаниеЛота, 
+//     LotDescription_en, 
+     Лот, 
+//     LotTitle_en, 
+     IsLot, 
+     ВалютаЛота, 
+     СуммаЛота as СуммаЛота_, 
+//     СуммаЛота as СуммаЛота_Валюта,
+//     НДСЛота, 
+//     ШагУменьшенияЛотВалюта, 
+//     ШагУменьшенияЛот as ШагУменьшенияЛот_,
+//     ШагУменьшенияЛот as ШагУменьшенияЛот_Валюта, 
+//     ШагУменьшенияЛотНДС, 
+     [Начальная дата аукциона лота], 
+     [Конечная дата аукциона лота],
+//     ТерминальнаяДатаЛота,
+//     ВалютаГарантииПредложенияЛота, 
+//     СуммаГарантииПредложенияЛота as СуммаГарантииПредложенияЛота_,
+//     СуммаГарантииПредложенияЛота as СуммаГарантииПредложенияЛота_Валюта,
+     Lot
+FROM Lot_????.qvd (qvd)
+Where Exists(IDTenderKey);
+
+TenderMedicalItem:
+Right Keep (Lot)
+LOAD
+	 IDLot
+Resident TenderMedicalItem_;
+
+DROP Table TenderMedicalItem;	 
+
+//// Обрезка тендеров не связанных с лотами
+//TenderMedicalLot:
+//Right Keep (Tender_)
+//LOAD
+//	 IDTenderKey
+//Resident TenderMedicalItem_;
+//
+//DROP Table TenderMedicalLot;
+////
+
+Left Join (Lot)
+LOAD
+	IDTenderKey,
+//	if(Lower(procurementMethod) = 'limited', 1) as IsLimitedLot,
+	СтатусТендера
+//	Дата as ДатаТендера
+Resident Tender_;
+
+Left Join (Lot)
+LOAD
+	IDLotKey,
+//	Date(Floor(ТерминальнаяДатаЛота)) as [Терминальная дата лота],
+	if(IsNull(СтатусЛота_), 
+		if(СтатусТендера Like 'active*', 'active', СтатусТендера),
+			if(Match(СтатусТендера, 'unsuccessful', 'cancelled') AND СтатусЛота_='active', СтатусТендера, СтатусЛота_)) as СтатусЛота //при отмене тендера, лоты не перенимают изменения статуса, а потому остаются в статусе "active", но поскольку закупка отменена, то и принимать участие в таких лотах невозможно
+Resident Lot;
+
+DROP Field СтатусЛота_;
+
+
+//  ================= Предложения ================= 
+Bid_Tmp:
+LOAD 
+	 IDTenderKey, 
+     ДатаПредложения, 
+//   ДатаПредложенияЛот,
+//	 ВебАдресУчастия,
+//   KeyBidAward,
+     IDBid, 
+     IDBidOrig as IDBID,
+//     ПлощадкаПредложения,
+     СтатусПредложения, 
+     СуммаПредложения as СуммаПредложения_, 
+     ВалютаПредложения, 
+//     НДСПредложения, 
+     IDTendererOrig as IDTendererKey,
+     KeyLotBid,
+     IDLotKey,
+     LotBidType
+FROM Bid_????.qvd (qvd)
+Where Exists(IDLotKey);
+
+BidStatus:
+Right Keep (Bid_Tmp)
+LOAD
+	 СтатусПредложения
+Resident Bid_Tmp
+Where СтатусПредложения <> 'deleted';	
+
+DROP Table BidStatus;
+
+Left Join (Bid_Tmp) 
+LOAD
+	 KeyLotBid,
+//	 СуммаПредложения_ as СуммаПредложения_Валюта,
+	 IDBid as IDBidKey,
+	 if(СтатусПредложения<>'invalid', 1, 0) as KeyLotBidFlag, // Для исключения ценовых предложений, где Bid в статусе invalid
+	 1 as BidType
+Resident Bid_Tmp;	 
+
+//
+//  ================= Оценки ================= 
+Award:
+LOAD KeyLotBid, 
+	 IDTenderKey,
+	 IDLotKey,
+     /*Timestamp(ДатаВремяЗакрытия)*/ ДатаВремяЗакрытия as ДатаПредложения, 
+//	 if(СтатусПротоколаОценки='unsuccessful', ДатаЗакрытия) as ДатаДисквалификации,
+//	 if(СтатусПротоколаОценки='active', ДатаЗакрытия) as ДатаВизначенняПереможця,
+     ДатаЗакрытия, 
+//     ОписаниеПротоколаОценки,
+     IDAward, 
+//     IDAward as IDAwardKey,
+     СтатусПротоколаОценки, 
+     IDTendererOrig as IDTendererKey,
+     IsLimitedAward,
+//     ПротоколОценки,
+     СуммаПротоколаОценки as СуммаПредложения_,
+//     СуммаПротоколаОценки as СуммаПредложения_Валюта,
+	 ВалютаПротоколаОценки as ВалютаПредложения 
+//	 НДСПротоколаОценки as НДСПредложения,
+//     [Начальная дата обжалования],
+//     [Конечная дата обжалования]
+//     ПодтверждениеСоответствия
+FROM Award_????.qvd (qvd)
+Where Exists(IDLotKey);
+
+Left Join (Award)
+LOAD
+	 IDAward,
+	 IDAward as IDAwardKey,
+	 if(СтатусПротоколаОценки='unsuccessful', ДатаЗакрытия) as ДатаДисквалификации,
+	 if(СтатусПротоколаОценки='active', ДатаЗакрытия) as ДатаВизначенняПереможця
+Resident Award;	 
+
+//  ================= Контракты ================= 
+Contract1:
+Load 
+	 IDTenderKey,
+	 IDAwardKey, 
+     IDContract,
+//     IDContractOrig,
+     IDContract as IDContractKey,
+//     ИдентификаторКонтракта as [Ідентифікатор договору],
+//	 НомерКонтракта,
+     СтатусКонтракта as СтатусКонтракта_, 
+//     ОписаниеКонтракта as [Опис договору з тендерів], 
+//     Контракт as ДоговірЗтендерів, 
+//     КонДатаКонтракта, 
+//     КонДатаКонтракта as [Дата закрытия контракта], 
+     КонДатаКонтракта as [Дата закінчення дії договору (згідно тендера)],
+//     НачДатаКонтракта as [Дата початку дії договору], 
+//     СуммаКонтракта as СуммаКонтракта_, 
+//     СуммаКонтракта as СуммаКонтракта_Валюта,
+	 СуммаКонтракта as [Сума договору (згідно тендера)],
+//	 СуммаКонтракта as [Сума договору (згідно тендера)_Валюта],
+     ВалютаКонтракта as ВалютаКонтракта_, 
+//     НДСКонтракта, 
+//     СуммаКонтрактаБезНДС as [Сума договору без ПДВ (згідно тендера)],
+//     СуммаКонтрактаБезНДС as [Сума договору без ПДВ (згідно тендера)_Валюта],
+//     ДатаВремяПодписания as [Дата і час підписання договору],
+     ДатаПодписания as [Дата підписання договору],
+     ДатаАктивацииКонтракта as [Дата публікації договору]
+//     ДатаВремяАктивацииКонтракта as [Дата і час публікації договору],
+//     isFromContracting
+FROM Contract_????.qvd (qvd)
+Where Exists(IDAwardKey);
+
+Contract_C:
+LOAD 
+     IDTenderKey, 
+     IDAwardKey, 
+//     IDContractOrig, 
+     IDContractKey, 
+     IDContract,
+//     ИдентификаторКонтракта as [Ідентифікатор договору], 
+//     НомерКонтракта, 
+     СтатусКонтракта, 
+//     ОписаниеКонтракта as [Опис договору], 
+//     Контракт as Договір, 
+//     ПлощадкаКонтракта, 
+//     НачДатаКонтракта as [Дата початку дії договору], 
+//     КонДатаКонтракта as [Дата закрытия контракта],
+	 КонДатаКонтракта as [Дата закінчення дії договору (згідно договору)],
+     ВалютаКонтракта, 
+//     ВалютаПлатежа, 
+//     СуммаКонтракта as СуммаКонтракта_, 
+//     СуммаКонтракта as СуммаКонтракта_Валюта,
+     СуммаКонтракта as [Сума договору (згідно договору)],
+//     СуммаКонтракта as [Сума договору (згідно договору)_Валюта],
+     СуммаПлатежа as [Сплачена сума_],
+//     СуммаПлатежа as [Сплачена сума у валюті договору], 
+//     НДСКонтракта, 
+//     НДСПлатежа, 
+//     СуммаКонтрактаБезНДС as [Сума договору без ПДВ (згідно договору)],
+//     СуммаКонтрактаБезНДС as [Сума договору без ПДВ (згідно договору)_Валюта],
+//     ДатаВремяПодписания as [Дата і час підписання договору], 
+     ДатаПодписания as [Дата підписання договору], 
+//     ДатаИзмененияКонтракта, 
+     terminationDetails as [Причини розірвання договору],
+//     [Причина розірвання договору], 
+//     [Причина разрыва договора], 
+//     [Cause of contract termination],
+//     [Ініціатор розірвання договору] as [Відповідальний за розірвання договору],
+//     Initiator as [Responsible for contract cancellation],
+     IDSupplierOrig as [Код постачальника (тех. ключ)]
+//     isFromContracting 
+FROM Contract_C_????.qvd (qvd)
+Where Exists(IDAwardKey);
+
+
+Left Join (Contract1)
+LOAD
+	 IDContract,
+	 СтатусКонтракта,
+//	 ВалютаПлатежа,
+	 [Сплачена сума_],
+//     [Сплачена сума у валюті договору],
+//     НДСПлатежа,
+     [Причини розірвання договору],
+//     [Причина розірвання договору], 
+//     [Причина разрыва договора], 
+//     [Cause of contract termination],
+//     [Відповідальний за розірвання договору],
+//     [Responsible for contract cancellation],
+//     ПлощадкаКонтракта,
+     [Код постачальника (тех. ключ)],
+     ВалютаКонтракта,
+//     ДатаИзмененияКонтракта,
+     [Сума договору (згідно договору)],
+//     [Сума договору без ПДВ (згідно договору)],
+//     [Сума договору без ПДВ (згідно договору)_Валюта],
+     [Дата закінчення дії договору (згідно договору)]
+//     Договір,
+//     [Опис договору]
+Resident Contract_C;	 
+
+
+Concatenate (Contract1)
+LOAD 
+     IDTenderKey, 
+     IDAwardKey, 
+//     IDContractOrig, 
+     IDContract as IDContractKey, 
+     IDContract,
+//     [Ідентифікатор договору], 
+//     НомерКонтракта, 
+     СтатусКонтракта,
+//     [Опис договору], 
+//     Договір, 
+//     ПлощадкаКонтракта, 
+//     [Дата початку дії договору], 
+//     КонДатаКонтракта, 
+     ВалютаКонтракта, 
+//     ВалютаПлатежа, 
+     [Сума договору (згідно договору)],
+//     [Сума договору (згідно договору)_Валюта],
+     [Сума договору (згідно договору)] as [Сума договору (згідно тендера)],
+//     [Сума договору (згідно договору)_Валюта] as [Сума договору (згідно тендера)_Валюта],
+//     [Сума договору без ПДВ (згідно договору)],
+//     [Сума договору без ПДВ (згідно договору)_Валюта],
+//     [Сума договору без ПДВ (згідно договору)] as [Сума договору без ПДВ (згідно тендера)],
+//     [Сума договору без ПДВ (згідно договору)_Валюта] as [Сума договору без ПДВ (згідно тендера)_Валюта],
+     [Дата закінчення дії договору (згідно договору)],
+     [Дата закінчення дії договору (згідно договору)] as [Дата закінчення дії договору (згідно тендера)],
+     [Сплачена сума_],
+//     [Сплачена сума у валюті договору], 
+//     НДСКонтракта, 
+//     НДСПлатежа, 
+//     [Дата і час підписання договору], 
+     [Дата підписання договору], 
+//     ДатаИзмененияКонтракта, 
+     [Причини розірвання договору],
+//     [Причина розірвання договору], 
+//     [Причина разрыва договора], 
+//     [Cause of contract termination],
+//     [Відповідальний за розірвання договору],
+//     [Responsible for contract cancellation],
+     [Код постачальника (тех. ключ)]
+//     isFromContracting
+Resident Contract_C
+Where NOT Exists(IDContractKey, IDContract);
+
+DROP Table Contract_C;
+
+//Left join(Contract1)
+//Load IDTenderKey,
+//	 Идентификатор as ИдентификаторТендераКонтракт,
+//	 procurementMethodType as procurementMethodTypeContract,
+//	 ОписаниеТендера as ОписаниеТендера,
+//	 Тендер as Тендер
+//Resident Tender_;
+
+Left join(Contract1)
+Load IDAwardKey,
+	 IDLotKey
+Resident Award;
+
+//Left join(Contract1)
+//Load 
+//	 IDLotKey,
+//	 ОписаниеЛота,
+//	 Лот
+//Resident Lot;
+
+ContractTmp:
+NoConcatenate
+LOAD  
+	 IDTenderKey, 
+     IDAwardKey, 
+     IDLotKey,
+//     IDContractOrig, 
+     IDContractKey, 
+//     IDContractKey as IDContractKey_TEMP,
+     IDContract,
+//     if(IsNull([Ідентифікатор договору]), ИдентификаторТендераКонтракт&'-c1', [Ідентифікатор договору]) as [Ідентифікатор договору], 
+//     procurementMethodTypeContract,
+//     НомерКонтракта, 
+     if(IsNull(СтатусКонтракта), СтатусКонтракта_, СтатусКонтракта) as СтатусКонтракта, 
+    
+//     ПлощадкаКонтракта, 
+//     [Дата початку дії договору], 
+     if(IsNull(ВалютаКонтракта), ВалютаКонтракта_, ВалютаКонтракта) as ВалютаКонтракта, 
+//     ВалютаПлатежа, 
+//     СуммаКонтракта_, 
+//     СуммаКонтракта_Валюта,
+//	 Alt([Сума договору (згідно тендера)], [Сума договору (згідно договору)]) as [Сума договору (згідно тендера)_],
+//     Alt([Сума договору (згідно тендера)_Валюта], [Сума договору (згідно договору)_Валюта]) as [Сума договору (згідно тендера)_Валюта],
+     Alt([Сума договору (згідно договору)], [Сума договору (згідно тендера)]) as [Сума договору (згідно договору)_],
+//     Alt([Сума договору (згідно договору)_Валюта], [Сума договору (згідно тендера)_Валюта]) as [Сума договору (згідно договору)_Валюта],
+     Alt([Дата закінчення дії договору (згідно договору)], [Дата закінчення дії договору (згідно тендера)]) as [Дата закінчення дії договору (згідно договору)],
+     Alt([Дата закінчення дії договору (згідно тендера)], [Дата закінчення дії договору (згідно договору)]) as [Дата закінчення дії договору (згідно тендера)],
+     
+//     [Сума договору без ПДВ (згідно тендера)] as [Сума договору без ПДВ (згідно тендера)_],
+//     [Сума договору без ПДВ (згідно тендера)_Валюта],
+     
+//     [Сума договору без ПДВ (згідно договору)] as [Сума договору без ПДВ (згідно договору)_],
+//     [Сума договору без ПДВ (згідно договору)_Валюта],
+     
+     [Сплачена сума_],
+//     [Сплачена сума у валюті договору], 
+//     НДСКонтракта, 
+//     НДСПлатежа, 
+//     [Дата і час підписання договору], 
+     [Дата підписання договору], 
+//     if(СтатусКонтракта = 'terminated', Date(Floor(ДатаИзмененияКонтракта))) as [Дата завершення договору], 
+     [Причини розірвання договору],
+//     [Причина розірвання договору], 
+//     [Причина разрыва договора], 
+//     [Cause of contract termination],
+//     [Відповідальний за розірвання договору],
+//     [Responsible for contract cancellation],
+//     Alt([Дата час публікації договору], ДатаВремяПодписания) as [Дата подписания контракта],
+     [Код постачальника (тех. ключ)],
+     Date(Floor([Дата публікації договору])) as [Дата публікації договору]
+//     [Дата і час публікації договору]
+//     isFromContracting
+Resident Contract1;
+
+DROP Table Contract1;
+
+Contract:
+NoConcatenate
+LOAD  
+	 IDTenderKey, 
+     IDAwardKey, 
+     IDLotKey,
+//     IDContractOrig, 
+     IDContractKey, 
+     IDContract,
+//     [Ідентифікатор договору], 
+//     НомерКонтракта, 
+     СтатусКонтракта, 
+//     [Опис договору], 
+//     Договір, 
+//     ПлощадкаКонтракта, 
+//     Date(Floor([Дата початку дії договору])) as [Дата початку дії договору], 
+//     КонДатаКонтракта, 
+     ВалютаКонтракта, 
+//     ВалютаПлатежа, 
+//     СуммаКонтракта_, 
+//     СуммаКонтракта_Валюта,
+//	 [Сума договору (згідно тендера)_],
+//     [Сума договору (згідно тендера)_Валюта],
+     [Сума договору (згідно договору)_],
+//     [Сума договору (згідно договору)_Валюта],
+     
+//     [Сума договору без ПДВ (згідно тендера)_],
+//     [Сума договору без ПДВ (згідно тендера)_Валюта],
+     
+//     [Сума договору без ПДВ (згідно договору)_],
+//     [Сума договору без ПДВ (згідно договору)_Валюта],
+     
+//     Date(Floor([Дата закінчення дії договору (згідно договору)])) as [Дата закінчення дії договору (згідно договору)],
+//     Date(Floor([Дата закінчення дії договору (згідно тендера)])) as [Дата закінчення дії договору (згідно тендера)],
+     if(СтатусКонтракта='active' AND [Дата закінчення дії договору (згідно договору)]+3 >= '$(vCurrentDate)', 1,
+     	if(СтатусКонтракта='active' AND ([Дата закінчення дії договору (згідно договору)]+3 < '$(vCurrentDate)' OR IsNull([Дата закінчення дії договору (згідно договору)])), 2,
+     		if(СтатусКонтракта='terminated' AND (IsNull([Причини розірвання договору]) OR [Причини розірвання договору]=''), 3,
+     			if(СтатусКонтракта='terminated' AND (NOT (IsNull([Причини розірвання договору]) OR [Причини розірвання договору]='')) AND [Сплачена сума_]=0, 4,
+     				if(СтатусКонтракта='terminated' AND (NOT (IsNull([Причини розірвання договору]) OR [Причини розірвання договору]='')) AND [Сплачена сума_]>0, 5
+     				)
+     			)
+     		)
+     	)
+     ) as ContractSubStatus,
+//     RangeMax(0, '$(vCurrentDate)'-(Floor([Дата закінчення дії договору (згідно договору)])+3) ) as [Затримка звіту про виконання договору (днів)],
+//     if(СтатусКонтракта='active' AND Floor([Дата закінчення дії договору (згідно договору)])+3 < '$(vCurrentDate)', 1, 
+//     	if(СтатусКонтракта='terminated' AND Floor([Дата закінчення дії договору (згідно договору)])+3 < [Дата завершення договору], 1, 0
+//     	)
+//     ) as [Невчасно опублікований звіт про виконання],
+//     [Сплачена сума_],
+//     [Сплачена сума у валюті договору], 
+//     НДСКонтракта, 
+//     НДСПлатежа, 
+//     [Дата і час підписання договору], 
+     [Дата підписання договору], 
+//     [Дата завершення договору], 
+//     if(([Дата публікації договору] - [Дата підписання договору]>3 AND procurementMethodTypeContract<>'reporting')
+//     	OR ([Дата публікації договору] - [Дата підписання договору]>1 AND procurementMethodTypeContract='reporting'), 1, 0) as [Невчасно опублікований договір],
+//     [Причини розірвання договору],
+//     [Причина розірвання договору], 
+//     [Причина разрыва договора], 
+//     [Cause of contract termination],
+//     [Відповідальний за розірвання договору],
+//     [Responsible for contract cancellation],
+//     [Дата подписания контракта],
+     [Код постачальника (тех. ключ)],
+     [Дата публікації договору]
+//     [Дата і час публікації договору],
+//     isFromContracting
+Resident ContractTmp
+Where NOT Match(СтатусКонтракта, 'cancelled', 'pending');
+
+DROP Table ContractTmp;
+
+//   ================ Изменения контракта из модуля контрактинга ================= 
+//ContractChangeTmp:
+ContractChange_C:
+LOAD Distinct 
+     IDContractKey, 
+     1 as [_Є додаткова угода]
+//     //IDTenderKey, 
+//     СтатусИзмененияКонтракта, 
+//     ДопНомерКонтракта, 
+//     Обоснование, 
+//     ДатаВнесенияИзмененияКонтракта as [Дата публікації змін до договору], 
+//     IDContractChange as [Ідентифікатор зміни договору], 
+//     [Дата внесення змін до договору],
+//     IDContractChangeKey
+FROM ContractChange_C_????.qvd (qvd)
+Where Exists(IDContractKey);
+
+Left Join (Contract)
+LOAD
+	 *
+Resident ContractChange_C;
+
+DROP Table ContractChange_C;	 
+
+
+Left Join (Contract)
+LOAD
+	 IDContractKey,
+	 Alt([_Є додаткова угода], 0) as [Є додаткова угода]
+Resident Contract;	
+
+DROP Field [_Є додаткова угода]; 
+
+
+//  ================= Жалобы Тендера ================= 
+ComplaintTenderTmp:
+LOAD 
+//     ОписаниеЖалобыТендера, 
+//     ЖалобаТендера, 
+//     ДатаЖалобыТендера, 
+//     ДатаПодачиТребованияЖалобыТендера, 
+//     ДатаОтветаЗаказчикаНаТребованиеЖалобыТендера, 
+//     ДатаЭскалацииТребованияЖалобыТендера, 
+//     ДатаПринятияРешенияПоТребованиюЖалобыТендера, 
+//     ДатаОтклоненияЖалобыТендера, 
+//     IDComplaintTender as IDComplaintTenderKey, 
+//     IDComplaintTender, 
+//     ИдентификаторЖалобыТендера, 
+//     РешениеЗаказчикаЖалобыТендера, 
+//     resolutionTypeTender, 
+     ComplaintTenderStatus,
+     [Complaint tender type],
+     IDTenderKey,
+     ДатаЖалобы     
+//     УдовлетвореноЖалобыТендера, 
+//     РешениеОрганаОбжалованияЖалобыТендера, 
+//     ПричиныОтклоненияЖалобыТендера, 
+//     IDLotKey,
+//     ДействиеУчастникаЖалобыТендера, 
+//     ДатаДействияУчастникаЖалобыТендера, 
+//     ДатаАкцептаЖалобыТендера,
+//     ОрганизацияЖалобыТендера, 
+//     ИндексЖалобыТендера, 
+//     СтранаЖалобыТендера, 
+//     АдресЖалобыТендера, 
+//     РегионЖалобыТендера, 
+//     ГородЖалобыТендера, 
+//     СхемаЖалобыТендера, 
+//     КодОргЖалобыТендера, 
+//     ТелефонЖалобыТендера, 
+//     ИмяЖалобыТендера, 
+//     ЭлАдресЖалобыТендера, 
+//     ПретензияУдовлетворенаЖалобыТендера, 
+//     rejectReasonTender, 
+//     ОписаниеПричиныОтклоненияЖалобыТендера, 
+//     ДатаРассмотренияЖалобыТендера, 
+//     МестоРассмотренияЖалобыТендера, 
+//     ComplaintLevel,
+//     ПодавшийЖалобу,
+//     Complainant,
+//     1 as  ComplaintType
+FROM ComplaintTender_????.qvd (qvd)
+Where Exists(IDTenderKey);
+
+//  ================= Жалобы Оценок ================= 
+Concatenate (ComplaintTenderTmp)
+LOAD 
+//     ОписаниеЖалобыОценки as ОписаниеЖалобыТендера, 
+//     ЖалобаОценки as ЖалобаТендера, 
+//     ДатаЖалобыОценки as ДатаЖалобыТендера, 
+//     ДатаПодачиТребованияЖалобыОценки as ДатаПодачиТребованияЖалобыТендера, 
+//     ДатаОтветаЗаказчикаНаТребованиеЖалобыОценки as ДатаОтветаЗаказчикаНаТребованиеЖалобыТендера, 
+//     ДатаЭскалацииТребованияЖалобыОценки as ДатаЭскалацииТребованияЖалобыТендера, 
+//     ДатаПринятияРешенияПоТребованиюЖалобыОценки as ДатаПринятияРешенияПоТребованиюЖалобыТендера, 
+//     ДатаОтклоненияЖалобыОценки as ДатаОтклоненияЖалобыТендера, 
+//     IDComplaintTender as IDComplaintTenderKey, 
+//     IDComplaintTender, 
+//     ИдентификаторЖалобыОценки as ИдентификаторЖалобыТендера, 
+//     РешениеЗаказчикаЖалобыОценки as РешениеЗаказчикаЖалобыТендера, 
+//     resolutionTypeAward as resolutionTypeTender, 
+     ComplaintAwardStatus as ComplaintTenderStatus,
+     [Complaint award type] as [Complaint tender type], 
+     IDTenderKey,
+     ДатаЖалобы     
+//     УдовлетвореноЖалобыОценки as УдовлетвореноЖалобыТендера, 
+//     РешениеОрганаОбжалованияЖалобыОценки as РешениеОрганаОбжалованияЖалобыТендера, 
+//     ПричиныОтклоненияЖалобыОценки as ПричиныОтклоненияЖалобыТендера, 
+//     IDLotKey,
+//     ДействиеУчастникаЖалобыОценки as ДействиеУчастникаЖалобыТендера, 
+//     ДатаДействияУчастникаЖалобыОценки as ДатаДействияУчастникаЖалобыТендера, 
+//     ДатаАкцептаЖалобыОценки as ДатаАкцептаЖалобыТендера,
+//     ОрганизацияЖалобыОценки as ОрганизацияЖалобыТендера, 
+//     ИндексЖалобыОценки as ИндексЖалобыТендера, 
+//     СтранаЖалобыОценки as СтранаЖалобыТендера, 
+//     АдресЖалобыОценки as АдресЖалобыТендера, 
+//     РегионЖалобыОценки as РегионЖалобыТендера, 
+//     ГородЖалобыОценки as ГородЖалобыТендера, 
+//     СхемаЖалобыОценки as СхемаЖалобыТендера, 
+//     КодОргЖалобыОценки as КодОргЖалобыТендера, 
+//     ТелефонЖалобыОценки as ТелефонЖалобыТендера, 
+//     ИмяЖалобыОценки as ИмяЖалобыТендера, 
+//     ЭлАдресЖалобыОценки as ЭлАдресЖалобыТендера, 
+//     ПретензияУдовлетворенаЖалобыОценки as ПретензияУдовлетворенаЖалобыТендера, 
+//     rejectReasonAward as rejectReasonTender, 
+//     ОписаниеПричиныОтклоненияЖалобыОценки as ОписаниеПричиныОтклоненияЖалобыТендера, 
+//     ДатаРассмотренияЖалобыОценки as ДатаРассмотренияЖалобыТендера, 
+//     МестоРассмотренияЖалобыОценки as МестоРассмотренияЖалобыТендера, 
+//     IDAwardKey as IDComplaintAwardKey,
+//     ComplaintLevel,
+//     ПодавшийЖалобу,
+//     Complainant,
+//     2 as ComplaintType
+FROM ComplaintAward_????.qvd (qvd)
+Where Exists(IDTenderKey);
+
+
+//  ================= Жалобы Квалификаций ================= 
+
+Concatenate (ComplaintTenderTmp)
+LOAD 
+//     ОписаниеЖалобыКвалификации as ОписаниеЖалобыТендера, 
+//     ЖалобаКвалификации as ЖалобаТендера, 
+//     ДатаЖалобыКвалификации as ДатаЖалобыТендера, 
+//     ДатаПодачиТребованияЖалобыКвалификации as ДатаПодачиТребованияЖалобыТендера, 
+//     ДатаОтветаЗаказчикаНаТребованиеЖалобыКвалификации as ДатаОтветаЗаказчикаНаТребованиеЖалобыТендера, 
+//     ДатаЭскалацииТребованияЖалобыКвалификации as ДатаЭскалацииТребованияЖалобыТендера, 
+//     ДатаПринятияРешенияПоТребованиюЖалобыКвалификации as ДатаПринятияРешенияПоТребованиюЖалобыТендера, 
+//     ДатаОтклоненияЖалобыКвалификации as ДатаОтклоненияЖалобыТендера, 
+//     IDComplaintTender, 
+//     IDComplaintTender as IDComplaintTenderKey,
+//     ИдентификаторЖалобыКвалификации as ИдентификаторЖалобыТендера, 
+//     РешениеЗаказчикаЖалобыКвалификации as РешениеЗаказчикаЖалобыТендера, 
+//     resolutionTypeQualif as resolutionTypeTender, 
+     ComplaintQualifStatus as ComplaintTenderStatus,
+     [Complaint qualif type] as [Complaint tender type], 
+     IDTenderKey,
+     ДатаЖалобы     
+//     УдовлетвореноЖалобыКвалификации as УдовлетвореноЖалобыТендера, 
+//     РешениеОрганаОбжалованияЖалобыКвалификации as РешениеОрганаОбжалованияЖалобыТендера, 
+//     ПричиныОтклоненияЖалобыКвалификации as ПричиныОтклоненияЖалобыТендера,
+//     IDLotKey, 
+//     ДействиеУчастникаЖалобыКвалификации as ДействиеУчастникаЖалобыТендера, 
+//     ДатаДействияУчастникаЖалобыКвалификации as ДатаДействияУчастникаЖалобыТендера, 
+//     ОрганизацияЖалобыКвалификации as ОрганизацияЖалобыТендера, 
+//     ИндексЖалобыКвалификации as ИндексЖалобыТендера, 
+//     СтранаЖалобыКвалификации as СтранаЖалобыТендера, 
+//     АдресЖалобыКвалификации as АдресЖалобыТендера, 
+//     РегионЖалобыКвалификации as РегионЖалобыТендера, 
+//     ГородЖалобыКвалификации as ГородЖалобыТендера, 
+//     СхемаЖалобыКвалификации as СхемаЖалобыТендера, 
+//     КодОргЖалобыКвалификации as КодОргЖалобыТендера, 
+//     ТелефонЖалобыКвалификации as ТелефонЖалобыТендера, 
+//     ИмяЖалобыКвалификации as ИмяЖалобыТендера, 
+//     ЭлАдресЖалобыКвалификации as ЭлАдресЖалобыТендера, 
+//     ПретензияУдовлетворенаЖалобыКвалификации as ПретензияУдовлетворенаЖалобыТендера, 
+//     ДатаАкцептаЖалобыКвалификации as ДатаАкцептаЖалобыТендера, 
+//     rejectReasonQualif as rejectReasonTender, 
+//     ОписаниеПричиныОтклоненияЖалобыКвалификации as ОписаниеПричиныОтклоненияЖалобыТендера, 
+//     ДатаРассмотренияЖалобыКвалификации as ДатаРассмотренияЖалобыТендера, 
+//     МестоРассмотренияЖалобыКвалификации as МестоРассмотренияЖалобыТендера, 
+//     KeyLotBid, 
+//     ComplaintLevel, 
+//     ПодавшийЖалобу, 
+//     Complainant,
+//     3 as  ComplaintType
+FROM ComplaintQualification_????.qvd (qvd)
+Where Exists(IDTenderKey);
+
+// Определение приостановленных тендеров (Жалобы в статусах: pending, accepted, stopping)
+Left Join (Tender_)
+LOAD Distinct
+	 IDTenderKey,
+	 1 as ComplaintTenderFlag
+Resident ComplaintTenderTmp
+Where Match(ComplaintTenderStatus, 'pending', 'accepted', 'stopping') AND Lower([Complaint tender type])='complaint' AND Year(ДатаЖалобы)>2015;	 
+
+DROP Table ComplaintTenderTmp;
+
+//  ================= Товары Тендера ================= 
+TenderItem:
+LOAD 
+	 IDTenderKey, 
+     КонДатаПоставки, 
+     НачДатаПоставки, 
+     Товар, 
+     Количество, 
+//     IDItem, 
+     IDItem as IDItemKey,
+     IDLotKey, 
+//     IDClassCPVKey, 
+     IDClassCPV,
+     IDClassItemDKPPKey, 
+     ItemUnitCode, 
+//     ЕдИзмерения as [Од. виміру], 
+//     LineNo, 
+     [Страна поставки], 
+     [Город поставки], 
+     [Индекс поставки], 
+     [Регион поставки], 
+     [Адрес поставки],
+     Широта, 
+     Долгота as Довгота
+FROM TenderItem_????.qvd (qvd)
+//Where Exists(IDTenderKey) AND NOT IsNull(IDLotKey); // Не загружаются Items без привязки к Лоту
+Where Exists(IDItem) //AND NOT IsNull(IDLotKey)
+;
+
+DROP Table TenderMedicalItem_;
+
+LotItems:
+Right Keep (TenderItem)
+LOAD
+	 IDLotKey
+Resident Lot;	 
+
+DROP Table LotItems;
+
+Left Join (TenderItem)
+LOAD
+	 IDItemKey,
+	 IDClassCPV as IDClassCPVKey
+Resident TenderItem;	 
+	 
+//  ================= Вопросы ================= 
+Question:
+LOAD 
+	 IDTenderKey, 
+//     ДатаВремяВопроса, 
+//     ДатаВремяОтвета,
+//     Вопрос, 
+     IDQuestion, 
+     questionOf, 
+     IDItemKey, 
+     IDLotKey 
+//     ЗаголовокВопроса, 
+//     Ответ, 
+//     ВопросОтEmail, 
+//     ВопросОтИмя, 
+//     ВопросОтТелефон, 
+//     ВопросОтUrl, 
+//     ВопросОтIDOrg, 
+//     ВопросОтОрганизация, 
+//     ВопросОтСхема, 
+//     ВопросОтЮрНазваниеОрганизации, 
+//     ВопросОтСтрана, 
+//     ВопросОтГород, 
+//     ВопросОтИндекс, 
+//     ВопросОтРегион, 
+//     ВопросОтАдрес
+FROM Question_????.qvd (qvd)
+Where Exists(IDTenderKey);
+
+Question_Link:
+LOAD
+	 IDQuestion,
+	 IDTenderKey
+Resident Question
+Where questionOf = 'tender';
+
+Left Join (Question_Link)
+LOAD 
+	 IDTenderKey,
+	 IDLotKey
+Resident Lot;
+
+DROP Field IDTenderKey From Question_Link;
+
+Concatenate (Question_Link)
+LOAD
+	 IDQuestion,
+	 IDLotKey
+Resident Question
+Where questionOf = 'lot';
+
+ItemQuestion:
+LOAD
+	 IDQuestion,
+	 IDItemKey
+Resident Question
+Where questionOf = 'item';	 
+
+DROP Table Question;
+
+Left Join (ItemQuestion)
+LOAD
+	 IDItemKey,
+	 IDLotKey
+Resident TenderItem;
+
+Concatenate (Question_Link)
+LOAD  
+	 IDQuestion,
+	 IDLotKey
+Resident ItemQuestion;
+
+DROP Table ItemQuestion;
+
+Left Join (Lot)
+Load 
+	 IDLotKey,
+     Count(DISTINCT IDQuestion) as [Кількість питань лота]
+Resident   Question_Link
+Group By IDLotKey;
+
+DROP Table Question_Link;
+	 
+//  ================= Отмены ================= 
+FOR Each vFileName in FileList('Cancellation_????.qvd')
+	CancellationTmp:
+	LOAD 
+	     IDTenderKey, 
+	     IDCancellation, 
+	     cancellationOf, 
+	     IDLotKey, 
+	     СтатусОтмены, 
+	     ПричинаОтмены, 
+	     ДатаОтмены
+	FROM [$(vFileName)] (qvd)
+	Where Exists(IDTenderKey);
+NEXT
+
+Cancellation:
+LOAD * Inline [
+IDTenderKey, IDCancellation, IDCancellationKey,  cancellationOf, IDLotKey, IDLotKey_TEMP, СтатусОтмены, ПричинаОтмены, ДатаОтмены
+];
+
+IF NoOfRows('CancellationTmp') > 0
+	Concatenate(Cancellation)
+	LOAD 
+	     IDTenderKey, 
+	     IDCancellation,
+	     IDCancellation as IDCancellationKey, 
+	     cancellationOf, 
+	     IDLotKey, 
+	     IDLotKey as IDLotKey_TEMP,
+	     СтатусОтмены, 
+	     ПричинаОтмены, 
+	     ДатаОтмены
+	Resident CancellationTmp
+	Where СтатусОтмены <> 'pending';
+	
+	DROP Table CancellationTmp;	  
+ENDIF   		 
+
+Left Join (Tender_)
+LOAD
+	LastValue(ДатаОтмены) as ДатаОтменыТендер,
+	IDTenderKey
+Resident Cancellation
+Where СтатусОтмены = 'active' AND cancellationOf = 'tender'
+Group By IDTenderKey
+Order By ДатаОтмены;	
+
+//добавление unsuccessful лотов допорогов
+Cancellation_Below:
+NoConcatenate
+load IDTenderKey,
+//	 'lot' as cancellationOf,
+//	 'відсутність пропозицій' as ПричинаОтмены
+	 [Конец приема предложений] as ДатаОтмены
+Resident Tender_
+where СтатусТендера <> 'active' and СтатусТендера <> 'active.enquiries' and СтатусТендера <> 'active.tendering' and СтатусТендера <> 'cancelled' and procurementMethodType = 'belowThreshold';
+
+inner join (Cancellation_Below)
+load IDTenderKey,
+	 IDLotKey
+//	 IDLotKey&'C' as IDCancellation
+Resident Lot
+where СтатусЛота = 'unsuccessful';
+
+Concatenate (Cancellation)
+load IDTenderKey,
+	 IDLotKey,
+	 IDLotKey&'B' as IDCancellation, 
+	 IDLotKey&'B' as IDCancellationKey, 
+	 'Відсутність тендерних пропозицій' as ПричинаОтмены,
+	 'lot' as cancellationOf,
+	 ДатаОтмены,
+	 'active' as СтатусОтмены
+	 //IDCancellation
+Resident Cancellation_Below
+where not Exists(IDLotKey_TEMP, IDLotKey);
+
+drop table Cancellation_Below;
+
+//добавление unsuccessful надпорогов (aboveThresholdUA, aboveThresholdEU, aboveThesholdUA.defense)
+
+//формирование общего списка
+
+Cancellation_Above_all:
+NoConcatenate
+Load IDTenderKey,
+	 //'lot' as cancellationOf,
+	 [Конец приема предложений] as ДатаОтмены1,
+	 //[ТерминальнаяДатаТендера] as ДатаОтмены2,
+	 [Конечная дата определения победителя] as ДатаОтмены2, 
+	 [Конец квалификационного периода] as ДатаОтмены3,
+	 procurementMethodType
+Resident Tender_
+where СтатусТендера <> 'active' and СтатусТендера <> 'active.tendering' and СтатусТендера <> 'cancelled' and procurementMethodType <> 'belowThreshold' and procurementMethod = 'open' /*and procurementMethodType <> 'aboveThresholdUA.defense'*/;
+
+inner join (Cancellation_Above_all)
+load IDTenderKey,
+	 IDLotKey
+	 //IDLotKey&'A' as IDCancellation
+Resident Lot
+where СтатусЛота = 'unsuccessful';
+
+left join (Cancellation_Above_all)
+LOAD IDLotKey,
+//	 Only(IDLotKey) as IDLotKey, 
+     IDBid as IDBidKey
+Resident Bid_Tmp
+where СтатусПредложения = 'active';
+
+//добавление aboveThresholdUA
+
+Cancellation_Above_UA:
+load IDLotKey,
+	 Only(IDTenderKey) as IDTenderKey,
+	 if(Count(DISTINCT IDBidKey)>=2, Only(ДатаОтмены2), Only(ДатаОтмены1)) as ДатаОтмены,
+	 if(Count(DISTINCT IDBidKey)>=2, 'Відхилення всіх тендерних пропозицій згідно з Законом про публічні закупівлі', 'Подання для участі в торгах менше двох тендерних пропозицій') as ПричинаОтмены
+Resident Cancellation_Above_all
+where procurementMethodType = 'aboveThresholdUA'
+Group by IDLotKey;
+
+Concatenate (Cancellation)
+load IDTenderKey,
+	 IDLotKey,
+	 IDLotKey&'A' as IDCancellation,
+	 IDLotKey&'A' as IDCancellationKey,
+	 ПричинаОтмены,
+	 'lot' as cancellationOf,
+	 'active' as СтатусОтмены,
+//	 IDAwardConcat,
+//	 IDAwardCount,
+//	 IDAwardCountDistinct,
+	 ДатаОтмены
+Resident Cancellation_Above_UA
+where not Exists(IDLotKey_TEMP, IDLotKey);
+
+drop table Cancellation_Above_UA;
+
+//добавление aboveThresholdEU
+
+Qualification:
+LOAD 
+	 IDLotKey,
+	 IDQualification,
+	 СтатусКвалификации
+From Qualification_????.qvd (qvd);
+
+Left Join (Cancellation_Above_all)
+LOAD
+	 IDLotKey,
+	 IDQualification
+Resident Qualification
+Where СтатусКвалификации = 'active';;
+
+DROP Table Qualification;	 
+
+Cancellation_Above_EU:
+load IDLotKey,
+	 Only(IDTenderKey) as IDTenderKey,
+	 //Concat(IDQualification) as IDQualificationConcat,
+	 if(Count(DISTINCT IDBidKey)<=2, Only(ДатаОтмены1), if(Count(DISTINCT IDQualification)<=2, Only(ДатаОтмены3), Only(ДатаОтмены2))) as ДатаОтмены,
+	 if(Count(DISTINCT IDBidKey)<=2, 'Подання для участі в торгах менше двох тендерних пропозицій', if(Count(DISTINCT IDQualification)<=2, 'Допущення до оцінки менше двох тендерних пропозицій', 'Відхилення всіх тендерних пропозицій згідно з Законом про публічні закупівлі')) as ПричинаОтмены
+Resident Cancellation_Above_all
+where procurementMethodType = 'aboveThresholdEU'
+Group by IDLotKey;
+
+Concatenate (Cancellation)
+load IDTenderKey,
+	 IDLotKey,
+	 IDLotKey&'A' as IDCancellation,
+	 IDLotKey&'A' as IDCancellationKey,
+	 ПричинаОтмены,
+	 'lot' as cancellationOf,
+	 'active' as СтатусОтмены,
+	 //IDQualificationConcat,
+	 ДатаОтмены
+Resident Cancellation_Above_EU
+where not Exists(IDLotKey_TEMP, IDLotKey);
+
+drop table Cancellation_Above_EU;
+
+Cancellation_Above_defense:
+load IDLotKey,
+	 Only(IDTenderKey) as IDTenderKey,
+	 if(Count(IDBidKey)>=1, Only(ДатаОтмены2), Only(ДатаОтмены1)) as ДатаОтмены,
+	 if(Count(IDBidKey)>=1, 'Відхилення всіх тендерних пропозицій згідно з Законом про публічні закупівлі', 'Не подання для участі в торгах жодної тендерної пропозиції') as ПричинаОтмены
+Resident Cancellation_Above_all
+where procurementMethodType = 'aboveThresholdUA.defense'
+Group by IDLotKey;
+
+drop table Cancellation_Above_all;
+
+Concatenate (Cancellation)
+load IDTenderKey,
+	 IDLotKey,
+	 ПричинаОтмены,
+	 'active' as СтатусОтмены,
+	 ДатаОтмены,
+	 'lot' as cancellationOf,
+	 IDLotKey&'D' as IDCancellation,
+	 IDLotKey&'D' as IDCancellationKey
+Resident Cancellation_Above_defense
+where not Exists(IDLotKey_TEMP, IDLotKey);
+
+drop table Cancellation_Above_defense;
+
+drop field IDLotKey_TEMP from Cancellation;
+
+DROP Table Cancellation;
+
+//  ================= Аукционы ================= 
+FOR Each vFileName in FileList('Auction_????.qvd')
+	AuctionTmp:
+	LOAD 
+		 KeyLotBid,
+		 IDTender as IDTenderKey,
+	     [Начальная сумма аукциона], 
+	     [Дата начального предложения],
+	     [Приведенная цена], 
+	     [Коэффициент коррекции],
+	     [Конечная сумма аукциона], 
+	     [Дата конечного предложения],
+	     [Сумма 3 раунда], 
+	     [Дата предложения 3 раунда],
+	     [Сумма 1 раунда], 
+	     [Дата предложения 1 раунда],
+	     [Сумма 2 раунда], 
+	     [Дата предложения 2 раунда]
+	FROM [$(vFileName)] (qvd)
+	Where Exists(KeyLotBid);
+NEXT
+
+Auction_:
+NoConcatenate
+LOAD * Inline [
+KeyLotBid, IDTenderKey, Начальная сумма аукциона, Дата начального предложения, Приведенная цена, Коэффициент коррекции, Конечная сумма аукциона, Дата конечного предложения, Сумма 3 раунда, Дата предложения 3 раунда, Сумма 1 раунда, Дата предложения 1 раунда, Сумма 2 раунда, Дата предложения 2 раунда, DistBidQty
+];
+
+IF NoOfRows('AuctionTmp') > 0
+	Concatenate (Auction_)
+	LOAD 
+		 KeyLotBid,
+		 LastValue(IDTenderKey) as IDTenderKey,
+	     LastValue([Начальная сумма аукциона]) as [Начальная сумма аукциона], 
+	     LastValue([Дата начального предложения]) as [Дата начального предложения],
+	     LastValue([Приведенная цена]) as [Приведенная цена], 
+	     LastValue([Коэффициент коррекции]) as [Коэффициент коррекции],
+	     LastValue([Конечная сумма аукциона]) as [Конечная сумма аукциона], 
+	     LastValue([Дата конечного предложения]) as [Дата конечного предложения],
+	     LastValue([Сумма 3 раунда]) as [Сумма 3 раунда], 
+	     LastValue([Дата предложения 3 раунда]) as [Дата предложения 3 раунда],
+	     LastValue([Сумма 1 раунда]) as [Сумма 1 раунда], 
+	     LastValue([Дата предложения 1 раунда]) as [Дата предложения 1 раунда],
+	     LastValue([Сумма 2 раунда]) as [Сумма 2 раунда], 
+	     LastValue([Дата предложения 2 раунда]) as [Дата предложения 2 раунда]
+	Resident AuctionTmp     
+	Group By KeyLotBid;
+	
+	DROP Table AuctionTmp;
+	
+	Auction:
+	NoConcatenate
+	LOAD 
+		 KeyLotBid,
+		 IDTenderKey,
+	     [Начальная сумма аукциона] as [Начальная сумма аукциона_], 
+	     [Начальная сумма аукциона] as [Начальная сумма аукциона_Валюта],
+	     [Приведенная цена] as [Приведенная цена_], 
+	     [Приведенная цена] as [Приведенная цена_Валюта],
+	     [Коэффициент коррекции],
+	     Date([Дата начального предложения], '$(TimestampFormat)') as [Дата начального предложения],
+	     [Конечная сумма аукциона] as [Конечная сумма аукциона_],  
+	     [Конечная сумма аукциона] as [Конечная сумма аукциона_Валюта], 
+	     Date([Дата конечного предложения], '$(TimestampFormat)') as [Дата конечного предложения],
+	     [Сумма 3 раунда] as [Сумма 3 раунда_], 
+	     [Сумма 3 раунда] as [Сумма 3 раунда_Валюта],
+	     Date([Дата предложения 3 раунда], '$(TimestampFormat)') as [Дата предложения 3 раунда],
+	     [Сумма 1 раунда] as [Сумма 1 раунда_], 
+	     [Сумма 1 раунда] as [Сумма 1 раунда_Валюта],
+	     Date([Дата предложения 1 раунда], '$(TimestampFormat)') as [Дата предложения 1 раунда],
+	     [Сумма 2 раунда] as [Сумма 2 раунда_], 
+	     [Сумма 2 раунда] as [Сумма 2 раунда_Валюта],
+	     Date([Дата предложения 2 раунда], '$(TimestampFormat)') as [Дата предложения 2 раунда], 
+	     // Кол-во уникальных ставок на аукционе для каждого предложения по лоту
+	     Rangenumericcount([Начальная сумма аукциона], if([Сумма 1 раунда]=[Начальная сумма аукциона], '', 1), if([Сумма 2 раунда]=[Сумма 1 раунда], '', 1), if([Сумма 3 раунда]=[Сумма 2 раунда], '', 1)) as DistBidQty
+	// = Для устранения задвоенных записей, некорректная структура yaml файлов
+	Resident Auction_;
+	
+	DROP Table Auction_;
+ENDIF
+
+// Дополнительный Классификатор МНН
+AdditionalClassification:
+LOAD 
+//   IDTenderOrig,
+//	 IDClassCPV,
+//	 IDClassDKPPKey,
+	 IDClassItemDKPPKey,
+//	 ОписаниеКласс as МНН,  
+     ItemAddClasId, 
+   	 СхемаДопКлас
+//   Товар
+FROM AdditionalClassification_????.qvd (qvd)
+Where Exists(IDClassItemDKPPKey);
+
+Right Join (AdditionalClassification)
+LOAD * Inline [
+СхемаДопКлас
+INN
+];
+
+Left Join (TenderItem)
+LOAD
+	 IDClassItemDKPPKey,
+	 ItemAddClasId as МНН
+Resident AdditionalClassification;	 
+
+DROP Table AdditionalClassification;
+
+Left Join (TenderItem)
+LOAD
+	 IDItemKey,
+	 if(IsNull(МНН), 1, 0) as ItemwoINN,
+	 if(NOT (IsNull(МНН) OR Match(МНН, 'mono', 'comb drug')), 1, 0) as IncludeINN
+Resident TenderItem;	 
+///$tab 3 Справочники
+DIRECTORY [..\04_DataBase\02_QVD_DB\01_Dictionary\];
+
+// Участники
+//SET vTendererConvert = "if(Trim(IDTendererOrig)=0 OR (Left(IDTendererOrig, 1)='-' AND Right(IDTendererOrig, 1)='-') OR (Left(IDTendererOrig, 1)='_' AND Right(IDTendererOrig, 1)='_'), $2, $1)";
+
+Tenderer:
+LOAD СтранаУчастника as _СтранаУчастника, 
+     ГородУчастника as _ГородУчастника, 
+     ИндексУчастника as _ИндексУчастника, 
+     РегионУчастника as _РегионУчастника, 
+     АдресУчастника as _АдресУчастника, 
+     EmailУчастника, 
+     ИмяУчастника, 
+     ТелефонУчастника, 
+     СайтУчастника,
+     IDTendererOrig as IDTenderer,
+     ЮрНазваниеУчастника, 
+     СхемаУчастника as _СхемаУчастника, 
+     Участник as _Участник, 
+     Tenderer, 
+     IDTendererOrig as IDTendererKey,
+     contactPointTenderer, 
+     legalNameTenderer, 
+     TendererEN, 
+     [Tenderer city], 
+     [Tenderer region], 
+     [Tenderer country],
+     FromTenderId as [ІД тендера із останньою пропозицією],
+     procedureType,
+     DateTimeTenderer,
+     [Посилання на профіль в YouControl],
+//ТЗ https://docs.google.com/document/d/1-4Tl1hQ9FFWxNKQw2c35WV5VWm6HsDZ-A3v-4xA68PQ/edit     
+     if([Дата реєстрації юридичної особи]>='01.01.1927', [Дата реєстрації юридичної особи]) as [Дата реєстрації юридичної особи],
+     RegDateStatus;
+
+LOAD СтранаУчастника, 
+     ГородУчастника, 
+     ИндексУчастника, 
+     РегионУчастника, 
+     АдресУчастника, 
+     EmailУчастника, 
+     ИмяУчастника, 
+     ТелефонУчастника, 
+     СайтУчастника,
+     IDTendererOrig,
+     ЮрНазваниеУчастника, 
+     СхемаУчастника, 
+     Участник, 
+     Tenderer, 
+//     IDTenderer,
+     contactPointTenderer, 
+     legalNameTenderer, 
+     TendererEN, 
+     [Tenderer city], 
+     [Tenderer region], 
+     [Tenderer country],
+     FromTenderId,
+     procedureType,
+     DateTimeTenderer,
+     [Посилання на профіль в YouControl],
+     [Дата реєстрації юридичної особи], 
+     RegDateStatus 
+FROM Tenderer.qvd (qvd)
+Where Exists(IDTendererKey, IDTendererOrig);
+
+Left Join (Tenderer)
+LOAD IDTendererOrig  as IDTenderer, 
+     СхемаУчастника as СхемаУчастника_, 
+     Участник as Участник_, 
+     АдресУчастника as АдресУчастника_, 
+     ГородУчастника as ГородУчастника_, 
+     РегионУчастника as РегионУчастника_, 
+     ИндексУчастника as ИндексУчастника_, 
+     СтранаУчастника as СтранаУчастника_
+FROM TendererNames.qvd (qvd);
+
+Left Join (Tenderer)
+LOAD BLCode as IDTenderer, 
+     [Дата останнього оновлення чорного списку АМКУ] as [Є в чорному списку АМКУ_]
+FROM AMKU.qvd (qvd);
+
+Left Join (Tenderer)
+LOAD Distinct 
+     [Дата останнього оновлення чорного списку АМКУ]
+FROM AMKU.qvd (qvd);
+
+Left Join (Tenderer)
+LOAD
+	 IDTenderer,
+	 if((procedureType='noncompetitive' OR (procedureType='competitive' AND (DateTimeTenderer<'$(vTendererRuleDate)' OR IsNull(DateTimeTenderer)))) AND NOT IsNull(СхемаУчастника_), СхемаУчастника_, _СхемаУчастника) as СхемаУчастника,
+	 if((procedureType='noncompetitive' OR (procedureType='competitive' AND (DateTimeTenderer<'$(vTendererRuleDate)' OR IsNull(DateTimeTenderer)))) AND NOT IsNull(Участник_), Участник_, _Участник) as Участник,
+	 if((procedureType='noncompetitive' OR (procedureType='competitive' AND (DateTimeTenderer<'$(vTendererRuleDate)' OR IsNull(DateTimeTenderer)))) AND NOT IsNull(АдресУчастника_), АдресУчастника_, _АдресУчастника) as АдресУчастника,
+	 if((procedureType='noncompetitive' OR (procedureType='competitive' AND (DateTimeTenderer<'$(vTendererRuleDate)' OR IsNull(DateTimeTenderer)))) AND NOT IsNull(ГородУчастника_), ГородУчастника_, _ГородУчастника) as ГородУчастника,
+	 if((procedureType='noncompetitive' OR (procedureType='competitive' AND (DateTimeTenderer<'$(vTendererRuleDate)' OR IsNull(DateTimeTenderer)))) AND NOT IsNull(РегионУчастника_), РегионУчастника_, _РегионУчастника) as РегионУчастника,
+	 if((procedureType='noncompetitive' OR (procedureType='competitive' AND (DateTimeTenderer<'$(vTendererRuleDate)' OR IsNull(DateTimeTenderer)))) AND NOT IsNull(ИндексУчастника_), ИндексУчастника_, _ИндексУчастника) as ИндексУчастника,
+	 if((procedureType='noncompetitive' OR (procedureType='competitive' AND (DateTimeTenderer<'$(vTendererRuleDate)' OR IsNull(DateTimeTenderer)))) AND NOT IsNull(СтранаУчастника_), СтранаУчастника_, _СтранаУчастника) as СтранаУчастника,
+	 if(NOT IsNull([Є в чорному списку АМКУ_]), 1, 0) as [Є в чорному списку АМКУ]
+Resident Tenderer;	 
+
+Left Join (Tenderer)
+Load
+	 IDTenderer,
+	 Участник&' | '&IDTenderer as [Назва Учасника | Код Учасника],
+     TendererEN&' | '&IDTenderer as [Tenderer | Tenderer code]
+Resident  Tenderer;	    
+
+DROP Fields СхемаУчастника_, _СхемаУчастника, Участник_, _Участник, АдресУчастника_, _АдресУчастника, ГородУчастника_, 
+_ГородУчастника, РегионУчастника_, _РегионУчастника, ИндексУчастника_, _ИндексУчастника, СтранаУчастника_, 
+_СтранаУчастника, procedureType, DateTimeTenderer, [Є в чорному списку АМКУ_] From Tenderer;
+
+// ТЗ https://docs.google.com/document/d/1aT3zBQr-IwPxEeirHjezwqwlgrHiF37upojYOcGRDlk
+// Статус юр. лица
+Left Join (Tenderer)
+LOAD EDRPOU as IDTenderer, 
+//     [Статус юридичної особи із ЄДР], 
+     [Дата оновлення інформації про статус юридичної особи],
+     StatusUOID,
+     Resident as _Resident
+FROM EDR_UO.qvd (qvd);
+
+Left Join (Tenderer)
+LOAD * Inline [
+StatusUOID,	Статус юридичної особи,							Legal person status
+1,			Припинено,										Liquidated
+2,			В стані припинення,								Under liquidation
+3,			Порушено справу про банкрутство (санація),		Bankruptcy case initiated (external management)
+4,			Порушено справу про банкрутство,				Bankruptcy case initiated
+5,			Свідоцтво про державну реєстрацію недійсне,		Certificate of registration invalid
+6,			Зареєстровано,									Operating
+];
+
+DROP Field StatusUOID;
+
+//Left Join (Tenderer)
+//LOAD 
+//	 IDTenderer, 
+////     titles, 
+//     Resident as _Resident
+//FROM EDR.qvd (qvd);
+
+// Поставщики (контрактинг)
+Suppliers:
+LOAD 
+     СтранаПоставщика as [Країна постачальника], 
+     ГородПоставщика as [Населений пункт постачальника], 
+     ИндексПоставщика as [Індекс постачальника], 
+     РегионПоставщика as [Регіон постачальника], 
+     АдресПоставщика as [Адреса постачальника], 
+     EmailПоставщика as [Email постачальника], 
+     ИмяПоставщика as [Представник постачальника], 
+     ТелефонПоставщика as [Телефон постачальника], 
+     СайтПоставщика as [Сайт постачальника], 
+     ФаксПоставщика as [Факс постачальника], 
+     IDSupplierOrig as [Код постачальника], 
+     IDSupplierOrig as [Код постачальника (тех. ключ)], 
+     ЮрНазваниеПоставщика as [Юр назва постачальника], 
+     СхемаПоставщика as [Код реєстру постачальника], 
+     Поставщик as [Постачальник];
+     
+LOAD 
+     СтранаПоставщика, 
+     ГородПоставщика, 
+     ИндексПоставщика, 
+     РегионПоставщика, 
+     АдресПоставщика, 
+     EmailПоставщика, 
+     ИмяПоставщика, 
+     ТелефонПоставщика, 
+     СайтПоставщика, 
+     ФаксПоставщика, 
+     IDSupplierOrig, 
+//     IDSupplier, 
+     ЮрНазваниеПоставщика, 
+     СхемаПоставщика, 
+     Поставщик
+FROM Supplier_C.qvd (qvd)
+Where exists ([Код постачальника (тех. ключ)], IDSupplierOrig);
+
+Left Join (Suppliers)
+LOAD
+	 IDTenderer as [Код постачальника],
+	 TendererEN as SupplierEN
+Resident Tenderer;	 
+
+// Классификация CPV
+ClassificationCPV:
+LOAD  
+     ГруппаТовара as КлассификацияCPV,
+     ItemGroup as ClassificationCPV,
+     IDClassCPV as IDClassCPVKey
+FROM ItemCPV.qvd (qvd)
+Where Exists(IDClassCPVKey, IDClassCPV);
+
+ItemTmp:
+LOAD IDClassCPV, 
+     ГруппаТовара as [Классификация CPV],
+     ItemGroup as [CPV Classification],
+     Left(IDClassCPV, 2) as КодПодразделения,
+     if(Mid(IDClassCPV, 3, 1)<>0, Left(IDClassCPV, 3)) as КодГруппы,
+     if(Mid(IDClassCPV, 4, 1)<>0, Left(IDClassCPV, 4)) as КодКласса,
+     if(Mid(IDClassCPV, 5, 1)<>0, Left(IDClassCPV, 5)) as КодКатегории,
+     if(Mid(IDClassCPV, 6, 1)<>0, Left(IDClassCPV, 8)) as КодПодКатегории,
+     IDClassCPVKey;
+     
+LOAD IDClassCPV, 
+     ГруппаТовара,
+     ItemGroup,
+     IDClassCPV as IDClassCPVKey
+FROM ItemCPV.qvd (qvd)
+Where  WildMatch(IDClassCPV, '330*', '331*', '336*') // Д/б весь справочник
+;
+
+Left Join (ItemTmp)
+LOAD Distinct
+	Left(IDClassCPV, 2) as КодПодразделения,
+	[Классификация CPV] as Подразделения,
+	[CPV Classification] as Divisions
+Resident ItemTmp
+Where IDClassCPV like '??000000*';	
+
+Left Join (ItemTmp)
+LOAD Distinct
+	Left(IDClassCPV, 3) as КодГруппы,
+	[Классификация CPV] as Группы,
+	[CPV Classification] as Groups
+Resident ItemTmp
+Where IDClassCPV like '???00000*' AND Mid(IDClassCPV, 3, 1)<>0;
+
+Left Join (ItemTmp)
+LOAD Distinct
+	Left(IDClassCPV, 4) as КодКласса,
+	[Классификация CPV] as Классы,
+	[CPV Classification] as Classes
+Resident ItemTmp
+Where IDClassCPV like '????0000*' AND Mid(IDClassCPV, 4, 1)<>0;
+
+Left Join (ItemTmp)
+LOAD Distinct
+	Left(IDClassCPV, 5) as КодКатегории,
+	[Классификация CPV] as Категории,
+	[CPV Classification] as Categories
+Resident ItemTmp
+Where IDClassCPV like '?????000*' AND Mid(IDClassCPV, 5, 1)<>0;
+
+Left Join (ItemTmp)
+LOAD Distinct
+	Left(IDClassCPV, 8) as КодПодКатегории,
+	[Классификация CPV] as Подкатегории,
+	[CPV Classification] as Subcategories
+Resident ItemTmp
+Where Mid(IDClassCPV, 6, 1)<>0 AND NOT IDClassCPV like '99999999*';
+
+//ItemTmpLast:
+//NoConcatenate
+//LOAD
+//	 [Классификация CPV],
+//	 [Классификация CPV] as Подразделения,
+//	 [CPV Classification],
+//	 [CPV Classification] as Divisions,
+//	 IDClassCPVKey,
+//	 IDClassCPV
+//Resident ItemTmp
+//Where IDClassCPV like '99999999*';
+
+Drop Fields КодПодразделения, КодГруппы, КодКласса, КодКатегории, КодПодКатегории;
+
+ItemCPV:
+NoConcatenate
+LOAD
+	*,
+	Подразделения&if(NOT IsNull(Группы), '+/')&Группы&if(NOT IsNull(Классы), '+/')&Классы&if(NOT IsNull(Категории), '+/')&Категории&if(NOT IsNull(Подкатегории), '+/')&Подкатегории as [Иерархия товаров],
+	Divisions&if(NOT IsNull(Groups), '+/')&Groups&if(NOT IsNull(Classes), '+/')&Classes&if(NOT IsNull(Categories), '+/')&Categories&if(NOT IsNull(Subcategories), '+/')&Subcategories as [Item hierarchy]
+Resident ItemTmp
+//Where NOT IDClassCPV like '99999999*'
+;
+
+DROP Table ItemTmp;
+
+//// Для кода 99999999-9 — Не визначено
+//Concatenate (ItemCPV)
+//LOAD
+//	 [Классификация CPV],
+//	 Подразделения,
+//	 [CPV Classification],
+//	 Divisions,
+//	 IDClassCPVKey,
+//	 IDClassCPV,
+//	 [Классификация CPV] as [Иерархия товаров],
+//	 [CPV Classification]as [Item hierarchy]
+//Resident ItemTmpLast;
+//
+//DROP Table ItemTmpLast;
+
+//// Определение справочника товаров, работ и услуг
+//
+////031 - 449
+//NumGoodsList:
+//LOAD
+//	 Text(NUM(RecNo()+2, '00')) as IDClassCPVGoods
+//AutoGenerate 42;	 
+//
+//LET vNumGoodsListCount = NoOfRows('NumGoodsList')+2;
+//
+//SET vIDClassCPVGoods ='';
+//
+//FOR Each FValue in FieldValueList('IDClassCPVGoods')
+//
+//LET vIDClassCPVGoods = vIDClassCPVGoods & chr(39) & FValue & '*' & chr(39) & if(FValue<>vNumGoodsListCount, ', ');
+//
+//NEXT FValue;
+//
+//DROP Table NumGoodsList;
+//
+//
+//CPVTypes:
+//LOAD
+//	 IDClassCPV,
+//	 1 as CPVType // CPV Goods
+//Resident ItemCPV
+//Where WildMatch(IDClassCPV, $(vIDClassCPVGoods));	 
+//
+//Concatenate (CPVTypes)
+//LOAD
+//	 IDClassCPV,
+//	 2 as CPVType // CPV Works
+//Resident ItemCPV
+//Where WildMatch(IDClassCPV, '45*');	 
+//
+//Concatenate (CPVTypes)
+//LOAD
+//	 IDClassCPV,
+//	 3 as CPVType // CPV services
+//Resident ItemCPV
+//Where NOT WildMatch(IDClassCPV, $(vIDClassCPVGoods),'45*');
+//
+//Left Join (ItemCPV)
+//LOAD
+//	 IDClassCPV,
+//	 CPVType
+//Resident CPVTypes;	
+//
+//DROP Table  CPVTypes;
+//
+//CPVType:
+//LOAD * Inline [
+//CPVType,	Тип CPV, 	CPV type,		Тип CPVру
+//1,			Товари,		Goods,			Товары
+//2,			Роботи,		Works,			Работы
+//3,			Послуги,	Services,		Услуги
+//];
+
+
+
+//DROP Field 	ItemAddClasId; 
+
+// ТЗ https://docs.google.com/document/d/1H_pKGK5cSOqRoJfkLEzRG3vBmUagNh_UbbFqEUIaM1A
+INN:
+LOAD 
+	 МНН, 
+     Count(DISTINCT [Номер реєстраційного посвідчення]) as [Кількість реєстраційних посвідчень], 
+     Count(DISTINCT [Лікарська форма]) as [Кількість лікарських форм], 
+     Count(DISTINCT Доза) as [Кількість різних дозувань], 
+     Count(DISTINCT [Кількість в первинній упаковці]) as [Кількість одиниць в первинній упаковці]
+FROM DRLZstatic.qvd (qvd)
+Where Exists(МНН)
+Group By МНН;
+
+
+
+// Организаторы
+OrganizatorTmp:
+LOAD СтранаОрганизатора, 
+	 ИндексОрганизатора,
+     ГородОрганизатора, 
+     РегионОрганизатора, 
+     АдресОрганизатора, 
+     EmailОрганизатора, 
+     ПредставительОрганизатора, 
+     ТелефонОрганизатора,
+     IDOrganizatorOrig as IDOrganizator, 
+     if(IDOrganizatorOrig='', 1, 0) as IDOrganizatorBlankFlag,
+     IDOrganizatorOrig as IDOrganizatorKey, 
+     Trim(Replace(Replace(ЮрНазваниеОрганизатора, Chr(10), ' '), Chr(13), ' ')) as ЮрНазваниеОрганизатора, 
+     СхемаОрганизатора, 
+     Trim(Replace(Replace(Организатор, Chr(10), ' '), Chr(13), ' ')) as Организатор,
+     СайтОрганизатора,
+     ФаксОрганизатора,
+//   kind,
+     Trim(Replace(Replace(Organizer, Chr(10), ' '), Chr(13), ' ')) as Organizer, 
+     contactPointName,
+     ПредставительОрганизатораРу, 
+     Trim(Replace(Replace([legalName_en], Chr(10), ' '), Chr(13), ' ')) as legalName_en,
+     Trim(Replace(Replace(Organiser, Chr(10), ' '), Chr(13), ' ')) as Organiser,
+     [Organiser city];
+
+LOAD СтранаОрганизатора,
+	 ИндексОрганизатора, 
+     ГородОрганизатора, 
+     РегионОрганизатора, 
+     АдресОрганизатора, 
+     EmailОрганизатора, 
+     ПредставительОрганизатора, 
+     ТелефонОрганизатора,
+     IDOrganizatorOrig, 
+//     IDOrganizator, 
+     ЮрНазваниеОрганизатора, 
+     СхемаОрганизатора, 
+     Организатор,
+     СайтОрганизатора,
+     ФаксОрганизатора,
+//   kind,
+     Organizer, 
+     contactPointName, 
+     ПредставительОрганизатораРу, 
+     [legalName_en],
+     Organiser,
+     [Organiser city] 
+FROM Organizator.qvd (qvd)
+Where Exists(IDOrganizatorKey, IDOrganizatorOrig);
+
+// Подмена пустого кода ЕДРПОУ на 20517231
+Concatenate (OrganizatorTmp)
+LOAD
+	СтранаОрганизатора, 
+	 ИндексОрганизатора,
+     ГородОрганизатора, 
+     РегионОрганизатора, 
+     АдресОрганизатора, 
+     EmailОрганизатора, 
+     ПредставительОрганизатора, 
+     ТелефонОрганизатора,
+     '' as IDOrganizator, 
+     IDOrganizatorKey, 
+     ЮрНазваниеОрганизатора, 
+     СхемаОрганизатора, 
+     Организатор,
+     СайтОрганизатора,
+     ФаксОрганизатора,
+//   kind,
+     Organizer, 
+     contactPointName, 
+     ПредставительОрганизатораРу, 
+     [legalName_en],
+     Organiser,
+     [Organiser city] 
+Resident OrganizatorTmp
+Where IDOrganizator='20517231';	
+
+Left Join (OrganizatorTmp)
+LOAD
+	 IDOrganizator, 
+     IDOrganizatorKey as IDOrganizatorKeyBlank
+Resident OrganizatorTmp
+Where IDOrganizatorBlankFlag=1;	 
+
+Left Join (OrganizatorTmp)
+LOAD 
+//	 [GPA Kind] as [GPA Organiser Kind], 
+     IDOrganizator, 
+     OrganizatorEN
+FROM GPAOrganizator.qvd (qvd);
+
+Organizator_Tmp:
+NoConcatenate
+LOAD
+	 СтранаОрганизатора, 
+	 ИндексОрганизатора,
+     ГородОрганизатора, 
+     РегионОрганизатора, 
+     АдресОрганизатора, 
+     EmailОрганизатора, 
+     ПредставительОрганизатора, 
+     ТелефонОрганизатора,
+     IDOrganizator, 
+//   IDOrganizatorKeyBlank,
+     if(IDOrganizator='', IDOrganizatorKeyBlank, IDOrganizatorKey) as IDOrganizatorKey, 
+     ЮрНазваниеОрганизатора, 
+     СхемаОрганизатора, 
+     Организатор,
+     СайтОрганизатора,
+     ФаксОрганизатора,
+//   kind,
+     Organizer, 
+     contactPointName, 
+     ПредставительОрганизатораРу, 
+     [legalName_en],
+     Organiser,
+     OrganizatorEN,
+     [Organiser city]
+//     [GPA Organiser Kind] 
+Resident OrganizatorTmp
+Where IDOrganizatorBlankFlag<>1;	
+
+DROP Table OrganizatorTmp;
+
+IF FileSize('OrgRegionCityMap.qvd')>0 then
+	Left Join (Organizator_Tmp)
+	LOAD 
+		 IDOrganizator, 
+	     Region
+	//     Locality
+	FROM OrgRegionCityMap.qvd (qvd);
+	
+	Organizator:
+	NoConcatenate
+	LOAD СтранаОрганизатора, 
+		 if(Lower(СтранаОрганизатора)='україна', 'Ukraine', 'Other') as [Organiser country],
+		 ИндексОрганизатора,
+	     ГородОрганизатора, 
+	     if(РегионОрганизатора='', if(NOT IsNull(Region), Region, ''), РегионОрганизатора) as РегионОрганизатора, 
+	//   Region,
+	     АдресОрганизатора, 
+	     EmailОрганизатора, 
+	     ПредставительОрганизатора, 
+	     ТелефонОрганизатора,
+	     IDOrganizator, 
+	     IDOrganizatorKey, 
+	     ЮрНазваниеОрганизатора, 
+	     СхемаОрганизатора, 
+	     Организатор,
+	     СайтОрганизатора,
+	     ФаксОрганизатора,
+	//   kind,
+	     Organizer, 
+	     contactPointName, 
+	     ПредставительОрганизатораРу, 
+	     [legalName_en],
+	     if(IsNull(OrganizatorEN), Organiser, OrganizatorEN) as Organiser,
+	     [Organiser city]
+//	     [GPA Organiser Kind] 
+	Resident Organizator_Tmp;
+	
+	DROP Table Organizator_Tmp;
+ENDIF
+
+Left Join (Organizator)
+Load
+	 IDOrganizatorKey,
+     Организатор&' | '&IDOrganizator as ОрганізаторКод,
+     Organizer&' | '&IDOrganizator as OrganiserCode
+Resident Organizator;   
+
+// Иерархия Организаторов
+HierarchyOrganizatorTmp:
+LOAD 
+     IDOrganizator, 
+     [Краткое название], 
+     [Главный орган], 
+     [Второстепенный орган],
+     [Менеджер],
+     [Short name],
+     [Secondary agency],
+     [Head agency]
+FROM HierarchyOrganizator.qvd (qvd)
+Where Exists(IDOrganizator);
+
+Concatenate (HierarchyOrganizatorTmp)
+LOAD Distinct
+	 [Главный орган],
+	 [Head agency]
+Resident HierarchyOrganizatorTmp;	
+
+Concatenate (HierarchyOrganizatorTmp)
+LOAD Distinct
+	 [Главный орган],
+	 [Head agency],
+	 [Второстепенный орган],
+	 [Secondary agency]
+Resident HierarchyOrganizatorTmp;	
+
+HierarchyOrganizator:
+NoConcatenate
+LOAD
+	*,
+	1 as HierarchyFlag,
+	[Главный орган]&if(NOT IsNull([Второстепенный орган]), '+/')&[Второстепенный орган]&if(NOT IsNull([Краткое название]), '+/')&[Краткое название] as [Иерархия организаторов],
+	[Head agency]&if(NOT IsNull([Secondary agency]), '+/')&[Secondary agency]&if(NOT IsNull([Short name]), '+/')&[Short name] as [Organiser hierarchy]
+Resident HierarchyOrganizatorTmp;
+
+DROP Table HierarchyOrganizatorTmp;
+
+Left Join (HierarchyOrganizator)
+LOAD
+	IDOrganizator,
+	IDOrganizatorKey as IDOrganizatorHierarchyKey
+Resident Organizator;	
+
+Concatenate (HierarchyOrganizator)
+LOAD
+	Организатор as [Главный орган],
+//	Organiser as [Head agency],
+	Организатор as [Иерархия организаторов],
+//	Organiser as [Organiser hierarchy],
+	IDOrganizator,
+	0 as HierarchyFlag
+Resident 	Organizator
+Where NOT Exists(IDOrganizatorHierarchyKey, IDOrganizatorKey);
+
+DROP Field IDOrganizatorHierarchyKey;
+
+Left Join (Organizator)
+LOAD Distinct
+	 IDOrganizator,
+	 if(HierarchyFlag=0, 'Без ГО', [Главный орган]) as [Главный_орган],
+	 if(HierarchyFlag=0, 'Without HA', [Head agency]) as [Head_agency]
+Resident HierarchyOrganizator;	 
+
+// Единицы измерения товаров
+Left Join (TenderItem)
+LOAD 
+     ItemUnitCode, 
+     [Од. виміру], 
+     Unit
+//     [Ед. измерения]
+FROM UnitCodes.qvd (qvd)
+Where Lower(ItemUnitCodeType)='name';
+
+
+// Координаты областей
+RegionCoordinates:
+LOAD Region as РегионОрганизатора, 
+	 RegionEN as [Region of Organizer],
+     Coordinates
+FROM
+RegionCoordinates.qvd (qvd)
+//Where Exists (РегионОрганизатора, Region)
+;
+
+TendererRegionCoordinates:
+LOAD Region as РегионУчастника, 
+	 RegionEN as [Region of Tenderer],
+     Coordinates as TendererCoordinates
+FROM
+RegionCoordinates.qvd (qvd)
+//Where Exists (РегионУчастника, Region)
+;
+
+Left Join (Tenderer)
+LOAD
+	 РегионУчастника, 
+	 [Region of Tenderer] as [Region of Tenderer_]
+Resident TendererRegionCoordinates;	 
+
+
+// Статусы тендеров, перевод, сортировка
+TendersStatus:
+//Left Keep (Tender_)
+LOAD * Inline [
+СтатусТендера, 							Статус, 									Status,							ПорядокСтатуса
+active,									Активна закупівля,							Active tender,					1
+active.enquiries, 						Період уточнень, 							Enquiry period,					2
+active.tendering, 						Очікування пропозицій, 						Tendering,						3
+active.pre-qualification,				Прекваліфікація,							Pre-qualification,				4	
+active.pre-qualification.stand-still,	Прекваліфікація (період оскаржень),			Pre-qualification stand-still,	5
+active.auction, 						Період аукціону, 							Auction	period,					6
+active.qualification, 					Кваліфікація переможця, 					Winner qualification,			7
+active.awarded, 						Пропозиції розглянуто, 						Awarded,						8
+unsuccessful, 							Закупівля не відбулась, 					Tender unsuccessful,			9
+complete, 								Завершена закупівля, 						Tender completed,				10
+cancelled, 								Відмінена закупівля, 						Tender cancelled,				11
+];
+
+// ПодСтатусы тендеров, перевод
+SubTendersStatus:
+LOAD * Inline [
+ПодСтатусТендера,						Підстатуси тендера,							TenderSubStatuses,								Узагальнені статуси,		Generalized statuses,	ПорядокПодСтатуса, GenStatusOrder
+active,									Опубліковано намір укласти договір,			Intention published to conclude a contract,		Відбуваються,				Proceed,				1,					1
+active.enquiries,						Період уточнень,							Enquiry period,									Відбуваються,				Proceed,				2,					1
+active.tendering,						Період прийому пропозицій,					Tendering,										Відбуваються,				Proceed,				3,					1
+active.pre-qualification,				Прекваліфікація,							Pre-qualification,								Відбуваються,				Proceed,				4,					1
+active.pre-qualification.stand-still,	Прекваліфікація (період оскаржень),			Pre-qualification stand-still,					Відбуваються,				Proceed,				5,					1
+active.auction,							Аукціон,									Auction,										Відбуваються,				Proceed,				6,					1
+active.qualification,					Розгляд пропозицій,							Winner qualification,							Відбуваються,				Proceed,				7,					1
+active.qualification30,					Розгляд пропозицій 30 днів+,				Winner qualification 30 days+,					Відбуваються,				Proceed,				8,					1
+active.awarded,							Пропозиції розглянуто,						Awarded,										Відбуваються,				Proceed,				9,					1
+active.awarded30,						Пропозиції розглянуто 30 днів+,				Awarded 30 days+,								Відбуваються,				Proceed,				10,					1
+stopped.by.complaint,					Зупинено оскарженням,						Stopped by complaint,							Відбуваються,				Proceed,				11,					1
+unsuccessful,							Не відбувся,								Unsuccessful,									Неуспішні,					Unsuccessful,			12,					2
+complete,								Завершена закупівля,						Complete,										Завершені,					Complete,				13,					3
+cancelled,								Скасовано,									Cancelled,										Неуспішні,					Unsuccessful,			14,					2
+];
+
+// Тип процедуры закупки
+ProcurementMethodType:
+Left Keep (Tender_)
+LOAD * Inline [
+procurementMethodType,		Procurement Method Type,	 		Тип методу закупівлі, 									Конкурентність,			Competitiveness,	Допороговість,	BelowThresholdness
+belowThreshold,		   		Below Threshold,					Допорогова закупівля,			 						Конкурентні,			Competitive,		Допороги,		Below Threshold
+reporting,			   		Reporting,							Процедура звітування про укладений договір,				Неконкурентні,			NonCompetitive,		Допороги,		Below Threshold
+negotiation,		   		Negotiation,						Переговорна процедура,									Неконкурентні,			NonCompetitive,		Надпороги,		Above Threshold
+negotiation.quick,	   		Quick Negotiation,					Переговорна процедура за нагальною потребою,			Неконкурентні,			NonCompetitive,		Надпороги,		Above Threshold
+aboveThresholdUA,	   		Above Threshold UA,					Відкриті торги,											Конкурентні,			Competitive,		Надпороги,		Above Threshold
+aboveThresholdEU,	   		Above Threshold EU,					Відкриті торги із публікацією англ. мовою,				Конкурентні,			Competitive,		Надпороги,		Above Threshold
+aboveThresholdUA.defense,	Above Threshold UA Defense,			Переговорна процедура (для потреб оборони),				Конкурентні,			Competitive,		Надпороги,		Above Threshold
+reportingECat,				E-catalogues,						Е-каталоги,												Неконкурентні,			NonCompetitive,		Допороги,		Below Threshold
+];
+
+
+// Статусы контрактов, перевод, сортировка
+ContractsStatus:
+Left Keep (Contract)
+LOAD * Inline [
+СтатусКонтракта, 	Статус контракта, 		Contract status,			ПорядокСтатусаКонтракта
+pending, 			Узгодження договору, 	Approval of the contract,			1
+active, 			Активний, 				Active,								2
+cancelled, 			Скасований до підпису, 	Cancelled before signing,			3
+terminated, 		Завершений, 			Terminated,							4
+];
+
+// Подстатусы контрактов, перевод, сортировка
+ContractSubStatus:
+Left Keep (Contract)
+LOAD * Inline [
+ContractSubStatus, 	Підстатус договору, 					Contract substatus,			Підстатус договору (версія 2),	Substatus of a contract (vol.2)
+1, 					Активний, 								Active,						Активний,						Active
+2, 					Активний (із затримкою звітування), 	Active (report delay),		Активний,						Active
+3, 					Виконаний, 								Performed,					Виконаний,						Performed
+4, 					Розірваний (без сплати), 				Cancelled (no payments),	Розірваний,						Cancelled
+5,					Розірваний (були платежі),				Cancelled (with payments),	Розірваний,						Cancelled
+];
+
+
+// Статусы лотов, перевод, сортировка
+
+LotStatus:
+Left Keep (Lot)
+LOAD * Inline [
+СтатусЛота, 		Статус лота, 						Lot status,					ПорядокСтатусаЛота
+active, 			Активний лот закупівлі, 			Active tender lot,			1
+unsuccessful, 		Неуспішний лот закупівлі, 			Unsuccessful tender lot,	2
+complete, 			Завершено лот закупівлі, 			Complete tender lot,		3
+cancelled, 			Скасовано лот закупівлі, 			Cancelled tender lot,		4
+];
+
+
+// Справочник источника финансирования
+FinanceSource:
+LOAD * Inline [
+IsFunder,	Джерело фінансування,	Source of finance
+1,			Донорські кошти,		Funder's money
+0,			Інші кошти,				Other sources of funding
+];
+
+// Справочник наличия доп. соглашений
+ContractChanges:
+LOAD * Inline [
+IsContractChange,	Наявність додаткової угоди,		Contract Change
+1,					Є додаткова угода,				There is an additional agreement
+0,					Немає додаткової угоди,			There is no additional agreement
+];
+
+Funders:
+LOAD 
+	 [Ключ донора], 
+//     Донор, 
+//     [Країна донора], 
+//     [Населений пункт донора], 
+//     [Індекс донора], 
+//     [Регіон донора], 
+//     [Адреса донора], 
+//     [Email донора], 
+//     [Факс донора], 
+//     [Представник донора], 
+//     [Телефон донора], 
+//     [Посилання на донора], 
+//     [Код донора], 
+     [Юридична назва донора], 
+//     [Код реєстру донора], 
+//     Funder, 
+//     [Funder contact point name], 
+     [Funder legal name]
+//     ДонорРу, 
+//     [Представитель донора], 
+//     [Юридическое название донора]
+FROM Funders.qvd (qvd)
+Where Exists([Ключ донора]);
+
+// Выходные дни от КМУ
+Holidays:
+LOAD 
+	 Holidays
+FROM
+Holidays.qvd (qvd);
+
+LET vHolidays = Peek('Holidays', 0, 'Holidays');
+
+DROP Table Holidays;
+///$tab 4 Валюта
+// Определение последней даты победителя в тендере
+Left Join (Tender_)
+LOAD IDTenderKey, 
+     LastValue(ДатаЗакрытия) as ДатаВизначенняПереможця
+Resident Award
+Where СтатусПротоколаОценки = 'active'
+Group By IDTenderKey
+Order By ДатаПредложения;
+
+// Определение последней даты подписания контракта в тендере
+LastContract:
+LOAD IDAwardKey, 
+     LastValue([Дата підписання договору]) as ДатаПодписанияКонтракта 
+Resident Contract
+Where Match(СтатусКонтракта, 'active', 'terminated')
+Group By IDAwardKey
+Order By [Дата підписання договору];
+
+Left Join (LastContract)
+LOAD Distinct
+	 IDAwardKey,
+	 IDTenderKey
+Resident Award;	 
+
+Left Join (Tender_)
+LOAD IDTenderKey, 
+     LastValue(ДатаПодписанияКонтракта) as ДатаПодписанияКонтракта
+Resident LastContract
+Group By IDTenderKey
+Order By ДатаПодписанияКонтракта;
+
+DROP Table LastContract;
+
+Left Join (Tender_)
+LOAD IDTenderKey, 
+     Alt(ДатаПодписанияКонтракта, ДатаВизначенняПереможця, Дата) as ДатаКурсаВалют
+Resident Tender_;
+
+DROP Fields ДатаПодписанияКонтракта, ДатаВизначенняПереможця From Tender_;
+
+
+DistDates:
+LOAD 
+	 Num(Fieldvalue('Дата',RecNo())) as TenderDate
+AUTOGENERATE FieldValueCount('Дата'); 
+
+MinMaxDates:
+LOAD 
+	Min(TenderDate) as MinDate,
+	Max(TenderDate) as MaxDate
+RESIDENT DistDates;
+
+LET vMinDate = Date(Peek('MinDate', -1, 'MinMaxDates'));
+LET vMaxDate = Date(Peek('MaxDate', -1, 'MinMaxDates'));
+
+DROP TABLE MinMaxDates;
+
+Calendar_Tmp:
+LOAD Date('$(vMinDate)' + RecNo() - 1) as Дата
+AutoGenerate vMaxDate - vMinDate + 1;
+
+DIRECTORY [..\04_DataBase\02_QVD_DB\02_Transaction\];
+
+Currency:
+LOAD Дата, 
+     Валюта, 
+     Курс
+FROM Currency_*.qvd (qvd);
+
+// Курс до конца периода
+Currency_Tmp:
+LOAD 
+	 Валюта, 
+	 Max(Дата) as MaxDate 
+RESIDENT Currency 
+GROUP BY Валюта;
+
+LEFT JOIN (Currency_Tmp)
+LOAD 
+	 Валюта, 
+	 Дата as MaxDate, 
+	 Курс 
+RESIDENT Currency;
+
+LEFT JOIN (Currency_Tmp)
+LOAD Дата
+RESIDENT Calendar_Tmp;
+
+DROP Table Calendar_Tmp;
+
+Concatenate(Currency)
+LOAD Валюта, 
+	 Курс,
+	 Дата
+RESIDENT Currency_Tmp
+WHERE Дата > MaxDate;
+
+DROP TABLE Currency_Tmp;  
+
+// Курсы валют в тендерах
+FOR Each vCurr in FieldValueList('Валюта') 	
+
+	Left Join (Tender_)
+	LOAD 
+	 	Дата as ДатаКурсаВалют,
+	 	Курс as Curr$(vCurr)
+	Resident Currency
+	Where Валюта='$(vCurr)';	
+// Для пересчета сумм 	в EUR для GPA
+	
+	Left Join (Tender_)
+	LOAD 
+	 	Дата,
+	 	Курс as CurrPub$(vCurr)
+	Resident Currency
+	Where Валюта='$(vCurr)';
+	
+NEXT  vCurr
+
+Left Join (Tender_)
+LOAD
+	 IDTender,
+ 	 // Для нормальной отработки IntervalMatch в диапазонах
+	 NUM#(Pick(Match(ВалютаТендера, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), СуммаТендера_, СуммаТендера_*CurrUSD, СуммаТендера_*CurrEUR, СуммаТендера_*CurrRUB, СуммаТендера_*CurrGBP)) as СуммаТендера,
+//	 Pick(Match(ШагУменьшенияВалюта, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), ШагУменьшения_, ШагУменьшения_*CurrUSD, ШагУменьшения_*CurrEUR, ШагУменьшения_*CurrRUB, ШагУменьшения_*CurrGBP) as ШагУменьшения,
+//	 Pick(Match(ВалютаГарантииПредложения, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), СуммаГарантииПредложения_, СуммаГарантииПредложения_*CurrUSD, СуммаГарантииПредложения_*CurrEUR, СуммаГарантииПредложения_*CurrRUB, СуммаГарантииПредложения_*CurrGBP) as СуммаГарантииПредложения,
+	 
+	 NUM#(Pick(Match(ВалютаТендера, 'UAH', 'USD', 'RUB', 'GBP'), СуммаТендера_, СуммаТендера_*CurrPubUSD, СуммаТендера_*CurrPubRUB, СуммаТендера_*CurrPubGBP)) as СуммаТендераPub
+//	 Pick(Match(ШагУменьшенияВалюта, 'UAH', 'USD', 'RUB', 'GBP'), ШагУменьшения_, ШагУменьшения_*CurrPubUSD, ШагУменьшения_*CurrPubRUB, ШагУменьшения_*CurrPubGBP) as ШагУменьшенияPub,
+//	 Pick(Match(ВалютаГарантииПредложения, 'UAH', 'USD', 'RUB', 'GBP'), СуммаГарантииПредложения_, СуммаГарантииПредложения_*CurrPubUSD, СуммаГарантииПредложения_*CurrPubRUB, СуммаГарантииПредложения_*CurrPubGBP) as СуммаГарантииПредложенияPub
+Resident Tender_;	 
+
+Left Join (Tender_)
+LOAD
+	 IDTender,
+	 NUM#(if(ВалютаТендера='EUR', СуммаТендера_, Round(Floor(СуммаТендераPub/CurrPubEUR, 0.001), 0.01))) as TenderAmountEUR
+//	 if(ШагУменьшенияВалюта='EUR', ШагУменьшения_, Round(Floor(ШагУменьшенияPub/CurrPubEUR, 0.001), 0.01)) as MinStepEUR,
+//	 if(ВалютаГарантииПредложения='EUR', СуммаГарантииПредложения_, Round(Floor(СуммаГарантииПредложенияPub/CurrPubEUR, 0.001), 0.01)) as GuaranteeEUR
+Resident Tender_;	 
+
+DROP Fields СуммаТендера_, СуммаТендераPub/*, ШагУменьшения_, СуммаГарантииПредложения_, ШагУменьшенияPub, СуммаГарантииПредложенияPub*/;
+
+// Курсы валют в лотах
+Left Join (Lot)
+LOAD 
+	 IDTenderKey,
+	 CurrUSD,
+	 CurrEUR,
+	 CurrRUB,
+	 CurrGBP,
+	 CurrPubUSD,
+	 CurrPubEUR,
+	 CurrPubRUB,
+	 CurrPubGBP
+Resident Tender_;	 
+
+Left Join (Lot)
+LOAD
+	 IDLotKey,
+	 // Для нормальной отработки IntervalMatch в диапазонах
+	 NUM#(Pick(Match(ВалютаЛота, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), СуммаЛота_, СуммаЛота_*CurrUSD, СуммаЛота_*CurrEUR, СуммаЛота_*CurrRUB, СуммаЛота_*CurrGBP)) as СуммаЛота,
+//	 Pick(Match(ШагУменьшенияЛотВалюта, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), ШагУменьшенияЛот_, ШагУменьшенияЛот_*CurrUSD, ШагУменьшенияЛот_*CurrEUR, ШагУменьшенияЛот_*CurrRUB, ШагУменьшенияЛот_*CurrGBP) as ШагУменьшенияЛот,
+//	 Pick(Match(ВалютаГарантииПредложенияЛота, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), СуммаГарантииПредложенияЛота_, СуммаГарантииПредложенияЛота_*CurrUSD, СуммаГарантииПредложенияЛота_*CurrEUR, СуммаГарантииПредложенияЛота_*CurrRUB, СуммаГарантииПредложенияЛота_*CurrGBP) as СуммаГарантииПредложенияЛота,
+	 
+	 NUM#(Pick(Match(ВалютаЛота, 'UAH', 'USD', 'RUB', 'GBP'), СуммаЛота_, СуммаЛота_*CurrPubUSD, СуммаЛота_*CurrPubRUB, СуммаЛота_*CurrPubGBP)) as СуммаЛотаPub
+//	 Pick(Match(ШагУменьшенияЛотВалюта, 'UAH', 'USD', 'RUB', 'GBP'), ШагУменьшенияЛот_, ШагУменьшенияЛот_*CurrPubUSD, ШагУменьшенияЛот_*CurrPubRUB, ШагУменьшенияЛот_*CurrPubGBP) as ШагУменьшенияЛотPub,
+//	 Pick(Match(ВалютаГарантииПредложенияЛота, 'UAH', 'USD', 'RUB', 'GBP'), СуммаГарантииПредложенияЛота_, СуммаГарантииПредложенияЛота_*CurrPubUSD, СуммаГарантииПредложенияЛота_*CurrPubRUB, СуммаГарантииПредложенияЛота_*CurrPubGBP) as СуммаГарантииПредложенияЛотаPub
+Resident Lot;	 
+
+Left Join (Lot)
+LOAD
+	 IDLotKey,
+	 // Для нормальной отработки IntervalMatch в диапазонах
+	 NUM#(if(ВалютаЛота='EUR', СуммаЛота_, Round(Floor(СуммаЛотаPub/CurrPubEUR, 0.001), 0.01))) as LotAmountEUR
+//	 if(ШагУменьшенияЛотВалюта='EUR', ШагУменьшенияЛот_, Round(Floor(ШагУменьшенияЛотPub/CurrPubEUR, 0.001), 0.01)) as MinStepLotEUR,
+//	 if(ВалютаГарантииПредложенияЛота='EUR', СуммаГарантииПредложенияЛота_, Round(Floor(СуммаГарантииПредложенияЛотаPub/CurrPubEUR, 0.001), 0.01)) as LotGuaranteeEUR
+Resident Lot;	
+
+DROP Fields СуммаЛота_/*, ШагУменьшенияЛот_, СуммаГарантииПредложенияЛота_*/, СуммаЛотаPub/*, ШагУменьшенияЛотPub, СуммаГарантииПредложенияЛотаPub*/, ВалютаЛота;
+
+// Курсы валют в предложениях 
+Left Join (Bid_Tmp)
+LOAD 
+	 IDTenderKey,
+	 CurrUSD,
+	 CurrEUR,
+	 CurrRUB,
+	 CurrGBP,
+	 CurrPubUSD,
+	 CurrPubEUR,
+	 CurrPubRUB,
+	 CurrPubGBP
+Resident Tender_;
+
+Left Join (Bid_Tmp)
+LOAD
+	 KeyLotBid,
+	 Pick(Match(ВалютаПредложения, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), СуммаПредложения_, СуммаПредложения_*CurrUSD, СуммаПредложения_*CurrEUR, СуммаПредложения_*CurrRUB, СуммаПредложения_*CurrGBP) as СуммаПредложения,
+	 Pick(Match(ВалютаПредложения, 'UAH', 'USD', 'RUB', 'GBP'), СуммаПредложения_, СуммаПредложения_*CurrPubUSD, СуммаПредложения_*CurrPubRUB, СуммаПредложения_*CurrPubGBP) as СуммаПредложенияPub
+Resident Bid_Tmp;
+
+Left Join (Bid_Tmp)
+LOAD
+	 KeyLotBid,
+	 if(ВалютаПредложения='EUR', СуммаПредложения_, Round(Floor(СуммаПредложенияPub/CurrPubEUR, 0.001), 0.01)) as BidAmountEUR
+Resident Bid_Tmp;
+
+DROP Fields СуммаПредложения_, СуммаПредложенияPub From Bid_Tmp;
+
+// Курсы валют в протоколах оценки 
+Left Join (Award)
+LOAD 
+	 IDTenderKey,
+	 CurrUSD,
+	 CurrEUR,
+	 CurrRUB,
+	 CurrGBP,
+	 CurrPubUSD,
+	 CurrPubEUR,
+	 CurrPubRUB,
+	 CurrPubGBP
+Resident Tender_;
+
+Left Join (Award)
+LOAD
+	 IDAwardKey,
+	 Pick(Match(ВалютаПредложения, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), СуммаПредложения_, СуммаПредложения_*CurrUSD, СуммаПредложения_*CurrEUR, СуммаПредложения_*CurrRUB, СуммаПредложения_*CurrGBP) as СуммаПредложения,
+	 Pick(Match(ВалютаПредложения, 'UAH', 'USD', 'RUB', 'GBP'), СуммаПредложения_, СуммаПредложения_*CurrPubUSD, СуммаПредложения_*CurrPubRUB, СуммаПредложения_*CurrPubGBP) as СуммаПредложенияPub
+Resident Award;
+
+Left Join (Award)
+LOAD
+	 IDAwardKey,
+	 if(ВалютаПредложения='EUR', СуммаПредложения_, Round(Floor(СуммаПредложенияPub/CurrPubEUR, 0.001), 0.01)) as BidAmountEUR
+Resident Award;
+
+DROP Fields СуммаПредложения_, СуммаПредложенияPub From Award;
+
+// Курсы валют в контрактах 
+Left Join (Contract)
+LOAD 
+	 IDAwardKey,
+	 CurrUSD,
+	 CurrEUR,
+	 CurrRUB,
+	 CurrGBP,
+	 CurrPubUSD,
+	 CurrPubEUR,
+	 CurrPubRUB,
+	 CurrPubGBP
+Resident Award;
+
+Left Join (Contract)
+LOAD
+	 IDContractKey,
+	 Pick(Match(ВалютаКонтракта, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Сума договору (згідно договору)_], [Сума договору (згідно договору)_]*CurrUSD, [Сума договору (згідно договору)_]*CurrEUR, [Сума договору (згідно договору)_]*CurrRUB, [Сума договору (згідно договору)_]*CurrGBP) as [Сума договору (згідно договору)],
+//	 Pick(Match(ВалютаКонтракта, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Сума договору (згідно тендера)_], [Сума договору (згідно тендера)_]*CurrUSD, [Сума договору (згідно тендера)_]*CurrEUR, [Сума договору (згідно тендера)_]*CurrRUB, [Сума договору (згідно тендера)_]*CurrGBP) as [Сума договору (згідно тендера)],
+//	 Pick(Match(ВалютаПлатежа, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Сплачена сума_], [Сплачена сума_]*CurrUSD, [Сплачена сума_]*CurrEUR, [Сплачена сума_]*CurrRUB, [Сплачена сума_]*CurrGBP) as [Сплачена сума],
+	 
+//	 Pick(Match(ВалютаКонтракта, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Сума договору без ПДВ (згідно договору)_], [Сума договору без ПДВ (згідно договору)_]*CurrUSD, [Сума договору без ПДВ (згідно договору)_]*CurrEUR, [Сума договору без ПДВ (згідно договору)_]*CurrRUB, [Сума договору без ПДВ (згідно договору)_]*CurrGBP) as [Сума договору без ПДВ (згідно договору)],
+//	 Pick(Match(ВалютаКонтракта, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Сума договору без ПДВ (згідно тендера)_], [Сума договору без ПДВ (згідно тендера)_]*CurrUSD, [Сума договору без ПДВ (згідно тендера)_]*CurrEUR, [Сума договору без ПДВ (згідно тендера)_]*CurrRUB, [Сума договору без ПДВ (згідно тендера)_]*CurrGBP) as [Сума договору без ПДВ (згідно тендера)],
+	 
+	 Pick(Match(ВалютаКонтракта, 'UAH', 'USD', 'RUB', 'GBP'), [Сума договору (згідно договору)_], [Сума договору (згідно договору)_]*CurrPubUSD, [Сума договору (згідно договору)_]*CurrPubRUB, [Сума договору (згідно договору)_]*CurrPubGBP) as СуммаКонтрактаPub
+//	 Pick(Match(ВалютаКонтракта, 'UAH', 'USD', 'RUB', 'GBP'), [Сума договору (згідно тендера)_], [Сума договору (згідно тендера)_]*CurrPubUSD, [Сума договору (згідно тендера)_]*CurrPubRUB, [Сума договору (згідно тендера)_]*CurrPubGBP) as СуммаКонтрактаТендPub,
+//	 Pick(Match(ВалютаПлатежа, 'UAH', 'USD', 'RUB', 'GBP'), [Сплачена сума_], [Сплачена сума_]*CurrPubUSD, [Сплачена сума_]*CurrPubRUB, [Сплачена сума_]*CurrPubGBP) as СуммаПлатежаPub
+Resident Contract;
+
+Left Join (Contract)
+LOAD
+	 IDContractKey,
+	 if(ВалютаКонтракта='EUR', [Сума договору (згідно договору)_], Round(Floor(СуммаКонтрактаPub/CurrPubEUR, 0.001), 0.01)) as ContractAmountEUR
+//	 if(ВалютаКонтракта='EUR', [Сума договору (згідно тендера)_], Round(Floor(СуммаКонтрактаТендPub/CurrPubEUR, 0.001), 0.01)) as ContractTendAmountEUR,
+//	 if(ВалютаПлатежа='EUR', [Сплачена сума_], Round(Floor(СуммаПлатежаPub/CurrPubEUR, 0.001), 0.01)) as PayAmountEUR
+Resident Contract;
+
+DROP Fields ВалютаКонтракта, [Сума договору (згідно договору)_], СуммаКонтрактаPub;
+
+// Курсы валют в аукционах (на дату создания тендера)
+Left Join (Auction)
+LOAD 
+	 KeyLotBid,
+	 ВалютаПредложения,
+	 CurrUSD,
+	 CurrEUR,
+	 CurrRUB,
+	 CurrGBP,
+	 CurrPubUSD,
+	 CurrPubEUR,
+	 CurrPubRUB,
+	 CurrPubGBP
+Resident Bid_Tmp;
+
+// Если валюта предложения не определена (статус Bid=unsuccessful), то берется валюта из тендера
+Left Join (Auction)
+LOAD
+	 IDTenderKey,
+	 ВалютаТендера
+Resident Tender_;	 
+
+Left Join (Auction)
+LOAD 
+	 KeyLotBid,
+	 if(IsNull(ВалютаПредложения), ВалютаТендера, ВалютаПредложения) as ВалютаПредложенияАукциона
+Resident Auction;	 
+
+DROP Fields ВалютаПредложения, IDTenderKey From Auction;
+DROP Field ВалютаТендера;
+
+Left Join (Auction)
+LOAD
+	 KeyLotBid,
+	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Начальная сумма аукциона_], [Начальная сумма аукциона_]*CurrUSD, [Начальная сумма аукциона_]*CurrEUR, [Начальная сумма аукциона_]*CurrRUB, [Начальная сумма аукциона_]*CurrGBP) as [Начальная сумма аукциона],
+	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Приведенная цена_], [Приведенная цена_]*CurrUSD, [Приведенная цена_]*CurrEUR, [Приведенная цена_]*CurrRUB, [Приведенная цена_]*CurrGBP) as [Приведенная цена],
+	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Конечная сумма аукциона_], [Конечная сумма аукциона_]*CurrUSD, [Конечная сумма аукциона_]*CurrEUR, [Конечная сумма аукциона_]*CurrRUB, [Конечная сумма аукциона_]*CurrGBP) as [Конечная сумма аукциона],
+ 	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Сумма 3 раунда_], [Сумма 3 раунда_]*CurrUSD, [Сумма 3 раунда_]*CurrEUR, [Сумма 3 раунда_]*CurrRUB, [Сумма 3 раунда_]*CurrGBP) as [Сумма 3 раунда],
+ 	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Сумма 1 раунда_], [Сумма 1 раунда_]*CurrUSD, [Сумма 1 раунда_]*CurrEUR, [Сумма 1 раунда_]*CurrRUB, [Сумма 1 раунда_]*CurrGBP) as [Сумма 1 раунда],
+ 	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'EUR', 'RUB', 'GBP'), [Сумма 2 раунда_], [Сумма 2 раунда_]*CurrUSD, [Сумма 2 раунда_]*CurrEUR, [Сумма 2 раунда_]*CurrRUB, [Сумма 2 раунда_]*CurrGBP) as [Сумма 2 раунда],
+ 	 
+ 	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'RUB', 'GBP'), [Начальная сумма аукциона_], [Начальная сумма аукциона_]*CurrPubUSD, [Начальная сумма аукциона_]*CurrPubRUB, [Начальная сумма аукциона_]*CurrPubGBP) as [Начальная сумма аукционаPub],
+	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'RUB', 'GBP'), [Приведенная цена_], [Приведенная цена_]*CurrPubUSD, [Приведенная цена_]*CurrPubRUB, [Приведенная цена_]*CurrPubGBP) as [Приведенная ценаPub],
+	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'RUB', 'GBP'), [Конечная сумма аукциона_], [Конечная сумма аукциона_]*CurrUSD, [Конечная сумма аукциона_]*CurrRUB, [Конечная сумма аукциона_]*CurrGBP) as [Конечная сумма аукционаPub],
+ 	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'RUB', 'GBP'), [Сумма 3 раунда_], [Сумма 3 раунда_]*CurrPubUSD, [Сумма 3 раунда_]*CurrPubRUB, [Сумма 3 раунда_]*CurrPubGBP) as [Сумма 3 раундаPub],
+ 	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'RUB', 'GBP'), [Сумма 1 раунда_], [Сумма 1 раунда_]*CurrPubUSD, [Сумма 1 раунда_]*CurrPubRUB, [Сумма 1 раунда_]*CurrPubGBP) as [Сумма 1 раундаPub],
+ 	 Pick(Match(ВалютаПредложенияАукциона, 'UAH', 'USD', 'RUB', 'GBP'), [Сумма 2 раунда_], [Сумма 2 раунда_]*CurrPubUSD, [Сумма 2 раунда_]*CurrPubRUB, [Сумма 2 раунда_]*CurrPubGBP) as [Сумма 2 раундаPub]
+Resident Auction;
+
+Left Join (Auction)
+LOAD
+	 KeyLotBid,
+	 if(ВалютаПредложенияАукциона='EUR', [Начальная сумма аукциона_], Round(Floor([Начальная сумма аукционаPub]/CurrPubEUR, 0.001), 0.01)) as StartAuctionAmountEUR,
+	 if(ВалютаПредложенияАукциона='EUR', [Приведенная цена_], Round(Floor([Приведенная ценаPub]/CurrPubEUR, 0.001), 0.01)) as ReducedPriceEUR,
+	 if(ВалютаПредложенияАукциона='EUR', [Конечная сумма аукциона_], Round(Floor([Конечная сумма аукционаPub]/CurrPubEUR, 0.001), 0.01)) as EndAuctionAmountEUR,
+ 	 if(ВалютаПредложенияАукциона='EUR', [Сумма 3 раунда_], Round(Floor([Сумма 3 раундаPub]/CurrPubEUR, 0.001), 0.01)) as Round3AmountEUR,
+ 	 if(ВалютаПредложенияАукциона='EUR', [Сумма 1 раунда_], Round(Floor([Сумма 1 раундаPub]/CurrPubEUR, 0.001), 0.01)) as Round1AmountEUR,
+ 	 if(ВалютаПредложенияАукциона='EUR', [Сумма 2 раунда_], Round(Floor([Сумма 2 раундаPub]/CurrPubEUR, 0.001), 0.01)) as Round2AmountEUR
+Resident Auction;
+
+DROP Fields [Начальная сумма аукциона_], [Приведенная цена_], [Конечная сумма аукциона_], [Сумма 3 раунда_], [Сумма 2 раунда_], [Сумма 1 раунда_], [Начальная сумма аукционаPub], [Приведенная ценаPub], [Конечная сумма аукционаPub], [Сумма 3 раундаPub], [Сумма 2 раундаPub], [Сумма 1 раундаPub];
+
+DROP Fields CurrUSD, CurrEUR, CurrRUB, CurrGBP, ДатаКурсаВалют From Tender_, Lot, Bid_Tmp, Award, Contract, Auction;
+DROP Fields CurrPubUSD, CurrPubEUR, CurrPubRUB, CurrPubGBP From Tender_, Bid_Tmp, Award, Contract, Auction;
+DROP Fields CurrPubUSD, CurrPubRUB, CurrPubGBP From Lot;
+DROP Table Currency;
+
+///$tab 5 Для показателей
+DIRECTORY [..\04_DataBase\02_QVD_DB\02_Transaction\];
+
+// Определение последнего протокола оценки для каждого предложения
+
+AwardStaus_Tmp:
+NoConcatenate
+LOAD KeyLotBid, 
+     LastValue(СтатусПротоколаОценки) as СтатусПротоколаОценки,
+     LastValue(IsLimitedAward) as IsLimitedAward,
+     LastValue(IDTenderKey) as IDTenderKey,
+     LastValue(IDLotKey) as IDLotKey,
+	 LastValue(IDAwardKey) as IDAwardKey
+//	 LastValue(ОписаниеПротоколаОценки) as ОписаниеПротоколаОценки,
+//	 LastValue(ПротоколОценки) as ПротоколОценки
+Resident Award
+Group By KeyLotBid
+Order By ДатаПредложения;
+
+// Финальный статус протокола оценки в Award
+
+Left Join (Award)
+LOAD
+	 IDAwardKey,
+	 1 as EndAwardStatusFlag
+Resident AwardStaus_Tmp;	 
+
+
+Left Join (Bid_Tmp)
+LOAD
+	 KeyLotBid,
+	 IDAwardKey, 
+     СтатусПротоколаОценки
+//     ОписаниеПротоколаОценки,
+//     ПротоколОценки
+Resident AwardStaus_Tmp
+Where IsLimitedAward <> 1;  
+
+// Определение начальной и конечной дат Аукциона для тендера
+Left Join (Tender_)
+LOAD
+	IDTenderKey,
+	Date(Min([Начальная дата аукциона лота]), '$(TimestampFormat)') as [Начальная дата аукциона],
+	Date(Max([Конечная дата аукциона лота]), '$(TimestampFormat)') as [Конечная дата аукциона],
+//	Date(Floor(Max([Конечная дата аукциона лота]))) as [Дата аукциона тендер],
+	Count(IDLotKey) as [Кількість лотів]	
+Resident Lot
+Group By IDTenderKey;	
+
+Drop Fields [Начальная дата аукциона лота]; //[Конечная дата аукциона лота];
+
+// Определение кол-ва предложений для каждого лота
+
+Left Join (Lot)
+LOAD	
+	 IDLotKey,
+	 Count(DISTINCT IDBid) as КоличествоПредложенийЛотаTmp
+Resident Bid_Tmp
+Where СтатусПредложения <> 'invalid'
+Group By IDLotKey;	 
+
+
+
+// Отметка предложений от одного участника в одном и том же тендере, если одно из предложений выиграшное
+Left Join (Bid_Tmp)
+LOAD 
+	KeyLotBid,
+	IDTendererKey,
+	1 as AwardedTendererFlag
+Resident 	Bid_Tmp
+Where СтатусПротоколаОценки='active';
+
+// Приведенное значение предложения
+Left Join (Bid_Tmp)
+LOAD
+	 KeyLotBid,
+	 [Конечная сумма аукциона]/[Коэффициент коррекции] as СуммаПриведенногоПредложения_
+Resident Auction;	 
+
+DROP Table Auction;
+
+Left Join (Bid_Tmp)
+LOAD
+	 KeyLotBid,
+	 Alt(СуммаПриведенногоПредложения_, СуммаПредложения) as СуммаПриведенногоПредложения
+Resident Bid_Tmp;
+
+// Определение не выигранных предложений (более высокая цена)
+Left Join (Bid_Tmp)
+LOAD Distinct
+	 IDLotKey,
+	 СуммаПриведенногоПредложения as СуммаПриведенногоВыигранногоПредложения
+Resident Bid_Tmp
+Where СтатусПротоколаОценки='active';
+
+Bid:
+NoConcatenate
+LOAD IDTenderKey,
+     ДатаПредложения, 
+     KeyLotBid,
+     KeyLotBidFlag,
+     IDAwardKey,
+     IDLotKey,
+     IDBid, 
+     IDBidKey,
+     IDBID,
+//     ПлощадкаПредложения,
+     СтатусПредложения, 
+     СуммаПредложения, 
+//     СуммаПредложения_Валюта,
+     BidAmountEUR,
+//     ВалютаПредложения, 
+//     НДСПредложения, 
+     IDTendererKey,
+     BidType,
+     СтатусПротоколаОценки,
+     if(СтатусПротоколаОценки<>'active' AND СтатусПротоколаОценки<>'pending' AND СтатусПротоколаОценки<>'unsuccessful' AND СтатусПротоколаОценки<>'cancelled', 1) as NotReviewedFlag,
+     if(Previous(IDLotKey)=IDLotKey AND Previous(СтатусПротоколаОценки)='active' AND СуммаПриведенногоПредложения>СуммаПриведенногоВыигранногоПредложения AND СтатусПротоколаОценки<>'active' AND СтатусПротоколаОценки<>'unsuccessful' AND СтатусПротоколаОценки<>'cancelled', 1) as LoseHPriceFlag,
+     if((СтатусПротоколаОценки<>'active' OR IsNull(СтатусПротоколаОценки) AND AwardedTendererFlag<>1), 0, if(СтатусПротоколаОценки='active', 1)) as BidAwardFlag,
+//     Alt(IsBidDocLoad_, 0) as [Є файли пропозиції], //IsBidDocLoad,
+//     Alt(IsConfidentiality_, 0) as [Є конфіденційні файли у пропозиції],
+//     [Дата/час завантаження останнього файла пропозиції до завершення прийому пропозицій],
+//     if(IsNull([Дата/час завантаження останнього файла пропозиції до завершення прийому пропозицій]), 0, 1) as [Файли учасника завантажені до завершення подачі пропозицій],
+//     Alt(BidFileAfterTenderPeriod, 0) as [Файли учасника були завантажені після завершення подачі пропозицій],
+     1 as EndAwardStatusFlag,
+//     ОписаниеПротоколаОценки,
+//     ПротоколОценки,
+     LotBidType
+Resident Bid_Tmp
+Order By IDLotKey, СуммаПриведенногоПредложения;
+
+DROP Table Bid_Tmp;
+
+
+//// Определение  тендеров с определенным победителем
+//Left Join (Tender_)
+//LOAD Distinct
+//	 IDTenderKey,
+//     1 as 	TenderAwardFlagTmp
+//Resident 	Bid
+//Where СтатусПротоколаОценки='active';
+//
+//Left Join (Tender_)
+//LOAD Distinct
+//	 IDTenderKey,
+//     1 as 	TenderAwardFlagLimitedTmp
+//Resident 	AwardStaus_Tmp
+//Where СтатусПротоколаОценки='active' AND IsLimitedAward = 1;
+
+// Определение  лотов с определенным победителем
+Left Join (Lot)
+LOAD Distinct
+	 IDLotKey,
+     1 as 	LotAwardFlagTmp
+Resident 	Bid
+Where СтатусПротоколаОценки='active';
+
+Left Join (Lot)
+LOAD Distinct
+	 IDLotKey,
+     if(IsLimitedAward = 1, 1) as 	LotAwardFlagLimitedTmp,
+     IDAwardKey
+Resident 	AwardStaus_Tmp
+Where СтатусПротоколаОценки='active';
+
+DROP Table AwardStaus_Tmp;
+
+Left Join (Tender_)
+LOAD
+	 IDTenderKey,
+	 LastValue([Дата підписання договору]) as [Дата підписання договору]
+//	 1 as IsTenderContractFlagTmp
+Resident Contract
+Where Match(СтатусКонтракта, 'active', 'terminated')
+Group By IDTenderKey
+Order By [Дата підписання договору];
+
+DROP Field 	 IDTenderKey From Contract;
+
+Left Join (Tender_)
+LOAD
+	 IDTenderKey,
+	 Max(ДатаВизначенняПереможця) as ДатаВизначенняПереможця
+Resident Award
+Where EndAwardStatusFlag=1
+Group By IDTenderKey;
+
+Tender:
+NoConcatenate
+LOAD
+	*,
+	Alt(Date(Floor(ТерминальнаяДатаТендера)), Date(Floor(ДатаОтменыТендер)), Date(Floor([Дата підписання договору])), [Дата определения победителя], Floor(ДатаВизначенняПереможця), [Дата завершения подачи предложений] ) as [Дата завершения],
+	RangeMax(if(IsNull(ДатаОтменыТендер) AND IsNull(ТерминальнаяДатаТендера), if(IsNull([Дата підписання договору]), if(IsNull([Конечная дата определения победителя]), if(IsNull([Начальная дата определения победителя]), [Конец приема предложений], [Начальная дата определения победителя]), [Конечная дата определения победителя]), [Дата підписання договору]), Alt(ДатаОтменыТендер, ТерминальнаяДатаТендера))-if(IsNull([Начало периода уточнений]), Date(Date#(Mid(Идентификатор, 4, 10), 'YYYY-MM-DD')), [Начало периода уточнений]), 0) as [Длительность тендера],
+	RangeMax(Ceil(if(IsNull(ДатаОтменыТендер) AND IsNull(ТерминальнаяДатаТендера), if(IsNull([Дата підписання договору]), if(IsNull([Конечная дата определения победителя]), if(IsNull([Начальная дата определения победителя]), [Конец приема предложений], [Начальная дата определения победителя]), [Конечная дата определения победителя]), [Дата підписання договору]), Alt(ДатаОтменыТендер, ТерминальнаяДатаТендера))-if(IsNull([Начало периода уточнений]), Date(Date#(Mid(Идентификатор, 4, 10), 'YYYY-MM-DD')), [Начало периода уточнений])), 0) as [Длительность тендера д.],
+	RangeMax(if(IsNull(ДатаОтменыТендер) AND IsNull(ТерминальнаяДатаТендера), if(IsNull([Дата підписання договору]), if(IsNull([Конечная дата определения победителя]), if(IsNull([Начальная дата определения победителя]), [Конец приема предложений], [Начальная дата определения победителя]), [Конечная дата определения победителя]), [Дата підписання договору]), Alt(ДатаОтменыТендер, ТерминальнаяДатаТендера))-if(IsNull([Начало периода уточнений]), Date(Date#(Mid(Идентификатор, 4, 10), 'YYYY-MM-DD')), [Начало периода уточнений]), 0) as [Duration of tender],
+	RangeMax(Ceil(if(IsNull(ДатаОтменыТендер) AND IsNull(ТерминальнаяДатаТендера), if(IsNull([Дата підписання договору]), if(IsNull([Конечная дата определения победителя]), if(IsNull([Начальная дата определения победителя]), [Конец приема предложений], [Начальная дата определения победителя]), [Конечная дата определения победителя]), [Дата підписання договору]), Alt(ДатаОтменыТендер, ТерминальнаяДатаТендера))-if(IsNull([Начало периода уточнений]), Date(Date#(Mid(Идентификатор, 4, 10), 'YYYY-MM-DD')), [Начало периода уточнений])), 0) as [Duration of tender d.],
+	NetWorkDays(Alt([Начало периода уточнений], Дата), [Конец периода уточнений], $(vHolidays)) as [Период уточнений д.],
+	NetWorkDays(Alt([Начало приема предложений], [Дата завершения периода уточнений]), [Конец приема предложений], $(vHolidays)) as [Период приема предложений д.],
+	NetWorkDays(Alt([Начало приема предложений], [Дата завершения периода уточнений]), [Конец приема предложений], $(vHolidays)) as [Period of offers reception d.],
+	if(NOT (IsNull([Конечная дата аукциона]) OR IsNull([Конечная дата определения победителя])), NetWorkDays([Конечная дата аукциона], [Конечная дата определения победителя], $(vHolidays))) as [Период от аукциона до завершения],
+
+	if(IsNull([Ключ донора]), 0, 1) as IsFunder,
+	'$(vProZorroURL)'&Идентификатор as [Посилання на тендер],
+	if(Match(СтатусТендера, 'complete', 'cancelled', 'unsuccessful'), СтатусТендера,
+		if(СтатусТендера='active.awarded' AND Now(1)-[Конечная дата определения победителя]>30 AND ComplaintTenderFlag<>1, 'active.awarded30',
+			if(СтатусТендера='active.qualification' AND Now(1)-[Конечная дата аукциона]>30 AND ComplaintTenderFlag<>1, 'active.qualification30',
+				if(ComplaintTenderFlag=1 AND СтатусТендера<>'cancelled', 'stopped.by.complaint', СтатусТендера)))) as ПодСтатусТендера
+Resident Tender_;
+
+DROP Fields [Конечная дата определения победителя], [Начальная дата определения победителя], [Начало квалификационного периода], [Конец квалификационного периода], [Конец периода уточнений], [Начало периода уточнений],
+[Конец приема предложений], [Начало приема предложений], [Начальная дата аукциона], [Конечная дата аукциона], ДатаОтменыТендер;
+
+DROP Table Tender_;
+
+DROP Fields ComplaintTenderFlag;
+DROP Fields ДатаВизначенняПереможця, ТерминальнаяДатаТендера, [Дата підписання договору] From Tender;
+
+Left Join (Lot)
+LOAD
+	 IDTenderKey,
+//	 ДатаОтменыТендер,
+//	 [Термінальна дата тендера] as [Термінальна дата тендера Лот],
+	 Идентификатор as ІдентифікаторTender
+Resident Tender;	
+
+DROP Field IDAwardKey From Lot;
+
+// Количество позиций в лоте
+Left Join (Lot)
+LOAD
+	 IDLotKey,
+	 Count(IDItemKey) as [Кількість позицій в лоті]
+Resident TenderItem
+Group By IDLotKey;	 
+
+Left Join (Lot)
+LOAD
+	IDLotKey,
+	RangeSum(LotAwardFlagTmp, LotAwardFlagLimitedTmp) as LotAwardFlag,
+//	Alt(DistLotAuPriceTmp, 0) as DistLotAuPrice, 
+	Alt(КоличествоПредложенийЛотаTmp, 0) as КоличествоПредложенийЛота,
+//	Alt(HasItem_, 0) as HasItem,
+	Date(Floor([Конечная дата аукциона лота])) as [Дата аукціону],
+//	if(Match(СтатусЛота, 'active', 'complete'), 1, 0) as SuccessLotFlag,
+	'$(vProZorroURL)'&ІдентифікаторTender&if(IsLot=1, '?lot_id='&IDLOT&'#lots') as [Посилання на лот],
+	if([Кількість позицій в лоті] > 1, 0, 1) as [Є лише одна позиція в лоті]
+Resident Lot;	
+
+DROP Fields СтатусТендера, LotAwardFlagTmp, LotAwardFlagLimitedTmp, IsLot, ІдентифікаторTender, КоличествоПредложенийЛотаTmp From Lot; 
+
+
+// Определение лотов с хотя бы одной позицией без МНН
+
+Left Join (Lot)
+LOAD Distinct 
+	 IDLotKey,
+	 1 as LotwoINN
+Resident TenderItem
+Where IsNull(МНН);//МНН = '-';
+
+// ===================== Рассчет Экономии =====================
+Left Join (Bid)
+LOAD
+	 IDTenderKey,
+	 СтатусТендера
+Resident Tender;	 
+
+Left Join (Bid)
+LOAD
+	 IDLotKey,
+	 СтатусЛота,
+	 LotAwardFlag
+Resident Lot;	
+
+
+// Предложения рассмотрено
+Left Join (Lot)
+LOAD
+	IDLotKey,
+	СуммаПредложения as EndBid1
+Resident Bid
+Where СтатусПротоколаОценки='active' AND СтатусТендера='active.awarded' AND СтатусЛота <> 'unsuccessful' AND СтатусЛота <> 'cancelled';
+
+// Предложения рассмотрено и неопределен победитель
+Left Join (Lot)
+LOAD	
+	 IDLotKey,
+	 Min(СуммаПредложения) as EndBid2
+Resident Bid
+Where LotAwardFlag<>1 AND СтатусТендера='active.awarded' AND СтатусПротоколаОценки <> 'unsuccessful' AND СтатусЛота <> 'unsuccessful' AND СтатусЛота <> 'cancelled'
+Group By IDLotKey;	 	
+
+// Квалификация и неопределен победитель
+Left Join (Lot)
+LOAD	
+	 IDLotKey,
+	 Min(СуммаПредложения) as EndBid3
+Resident Bid
+Where LotAwardFlag<>1 AND СтатусТендера='active.qualification' AND СтатусПротоколаОценки <> 'unsuccessful' AND СтатусЛота <> 'unsuccessful' AND СтатусЛота <> 'cancelled'
+Group By IDLotKey;
+
+// Квалификация и определен победитель
+Left Join (Lot)
+LOAD	
+	 IDLotKey,
+	 Min(СуммаПредложения) as EndBid4
+Resident Bid
+Where LotAwardFlag=1 AND СтатусТендера='active.qualification' AND СтатусПротоколаОценки='active' AND СтатусЛота <> 'unsuccessful' AND СтатусЛота <> 'cancelled'
+Group By IDLotKey;
+
+// Завершенные
+Left Join (Lot)
+LOAD	
+	 IDLotKey,
+	 СуммаПредложения as EndBid5
+Resident Bid
+Where СтатусПротоколаОценки='active' AND СтатусТендера='complete' AND СтатусЛота <> 'unsuccessful' AND СтатусЛота <> 'cancelled';
+
+DROP Fields СтатусТендера, СтатусЛота, LotAwardFlag From Bid;
+
+ 
+Left Join (Lot)
+LOAD
+	IDLotKey,
+	Round(Floor(if(RangeSum(EndBid1, EndBid2, EndBid3, EndBid4, EndBid5)=0, 0, СуммаЛота - RangeSum(EndBid1, EndBid2, EndBid3, EndBid4, EndBid5)), 0.001), 0.01) as ЭкономияЛота,
+	Round(Floor(if(RangeSum(EndBid1, EndBid2, EndBid3, EndBid4, EndBid5)=0, 0, (СуммаЛота - RangeSum(EndBid1, EndBid2, EndBid3, EndBid4, EndBid5))/CurrPubEUR ), 0.001), 0.01) as LotSavingsEUR
+Resident Lot;
+
+DROP Fields EndBid1, EndBid2, EndBid3, EndBid4, EndBid5, CurrPubEUR;
+
+//// Экономия по тендеру
+//Left Join (Tender)
+//LOAD
+//	IDTenderKey,
+//	Sum(ЭкономияЛота) as Экономия,
+//	Sum(LotSavingsEUR) as SavingsEUR
+//Resident Lot
+//Group By IDTenderKey;	
+// ============================
+
+// % экономии по тендеру
+Left Join (Tender)
+LOAD
+	IDTenderKey,
+	Round(Floor(RangeSum(Sum(ЭкономияЛота)/Sum(СуммаЛота)), 0.001), 0.01)*100 as [% економії]
+Resident Lot
+Group By IDTenderKey;	
+
+
+Left Join (Lot)
+LOAD
+	IDLotKey,
+//	if(СтатусЛота <> 'unsuccessful' AND СтатусЛота <> 'cancelled', if(RangeSum(ЭкономияЛота/СуммаЛота)>=$(LimitEconomy), 1, 0)) as HLotEconomyFlag,
+	Round(Floor(RangeSum(ЭкономияЛота/СуммаЛота), 0.001), 0.01)*100 as %экономииЛота
+Resident Lot;	
+
+//Дата определения Победителя 
+AwardDate:
+LOAD Distinct
+	 KeyLotBid,
+	 ДатаВизначенняПереможця
+    ,if('$(vCurrentDate)'-ДатаВизначенняПереможця<7, 7) as _LastWin7
+    ,if('$(vCurrentDate)'-ДатаВизначенняПереможця<30, 30) as _LastWin30
+    ,if('$(vCurrentDate)'-ДатаВизначенняПереможця<60, 60) as _LastWin60
+Resident Award
+Where NOT IsNull(ДатаВизначенняПереможця) AND EndAwardStatusFlag=1;
+
+// Расчет количества дисквалификаций для каждого лота
+Left Join (Lot)
+LOAD  
+	 IDLotKey,
+	 Count(IDAwardKey) as LotDisqualQty
+Resident Award
+Where СтатусПротоколаОценки = 'unsuccessful'
+Group By IDLotKey;	 
+
+// ================= Определение участников-конкурентов ====================
+Concatenate (Bid)
+LOAD KeyLotBid, 
+	 IDLotKey,
+	 IDTenderKey,
+     ДатаПредложения, 
+//     ДатаЗакрытия, 
+//     ОписаниеПротоколаОценки,
+     IDAward, 
+     IDAwardKey,
+     СтатусПротоколаОценки,
+     IDTendererKey,
+     if(IsLimitedAward=1, 2, 0) as BidType,
+//     ПротоколОценки,
+     СуммаПредложения,
+//     СуммаПредложения_Валюта,
+     BidAmountEUR,
+//	 ВалютаПредложения, 
+//	 НДСПредложения,
+//     [Начальная дата обжалования],
+//     [Конечная дата обжалования],
+     EndAwardStatusFlag,
+	 2 as KeyLotBidFlag,
+	 if(СтатусПротоколаОценки<>'active' AND СтатусПротоколаОценки<>'pending' AND СтатусПротоколаОценки<>'unsuccessful' AND СтатусПротоколаОценки<>'cancelled', 1) as NotReviewedFlag
+//	 ПодтверждениеСоответствия,
+//	 [Дата зміни останнього файла оцінки],
+//	 [Дата публікації останнього файла оцінки]
+Resident Award;
+
+DROP Table  Award; 
+
+// ===================== Статусы ценовых предложений ===========================
+
+// Выигравшие
+LotBidStatus:
+LOAD
+	 KeyLotBid,
+	 'Won' as LotBidStatus,
+	 'Выигравшие' as [Статус ценовых предложений],
+	 'Що виграли' as [Статус цінових пропозицій]
+Resident Bid
+Where Match(BidType, 0, 2) AND EndAwardStatusFlag=1 AND СтатусПротоколаОценки='active';	 
+
+// Не выиграли (выше цена)
+Concatenate(LotBidStatus)
+LOAD
+	 KeyLotBid,
+	 'Not won (higher price)' as LotBidStatus,
+	 'Не выиграли (выше цена)' as [Статус ценовых предложений],
+	 'Не виграли (вища ціна)' as [Статус цінових пропозицій]
+Resident Bid
+Where BidType=1 AND LoseHPriceFlag=1;	 
+
+// Дисквалифицированы
+Concatenate(LotBidStatus)
+LOAD
+	 KeyLotBid,
+	 'Disqualifficated' as LotBidStatus,
+	 'Дисквалифицированы' as [Статус ценовых предложений],
+	 'Дискваліфіковані' as [Статус цінових пропозицій]
+Resident Bid
+Where Match(BidType, 0, 2) AND EndAwardStatusFlag=1 AND СтатусПротоколаОценки='unsuccessful';
+
+// Не рассмотренные
+Concatenate(LotBidStatus)
+LOAD
+	 KeyLotBid,
+	 'Not reviewed' as LotBidStatus,
+	 'Не рассмотренные' as [Статус ценовых предложений],
+	 'Не розглянуті' as [Статус цінових пропозицій]
+Resident Bid
+Where Match(BidType, 1, 2) AND NotReviewedFlag=1 AND LoseHPriceFlag<>1;
+
+// Отмененные
+Concatenate(LotBidStatus)
+LOAD
+	 KeyLotBid,
+	 'Cancelled' as LotBidStatus,
+	 'Отмененные' as [Статус ценовых предложений],
+	 'Відмінені' as [Статус цінових пропозицій]
+Resident Bid
+//Where BidType=1 AND СтатусПротоколаОценки='cancelled';
+Where Match(BidType, 1, 2) /*AND EndAwardStatusFlag=1*/ AND СтатусПротоколаОценки='cancelled';
+
+// Ожидают рассмотрения
+Concatenate(LotBidStatus)
+LOAD
+	 KeyLotBid,
+	 'Pending' as LotBidStatus,
+	 'Ожидают рассмотрения' as [Статус ценовых предложений],
+	 'Очікують розгляду' as [Статус цінових пропозицій]
+Resident Bid
+Where Match(BidType, 1, 2) AND СтатусПротоколаОценки='pending';
+
+//
+AddTenderer:
+NoConcatenate
+LOAD Distinct
+	 IDLotKey,
+	 IDTendererKey,
+	 СтатусПротоколаОценки as СтатусПротоколуОцінкиКонкурента
+Resident Bid
+Where Match(BidType, 1, 2) AND NOT IsNull(IDTendererKey);	 
+
+Left Join (AddTenderer)
+LOAD 
+	IDTendererKey,
+	Участник as УчастникКонкурент,
+	TendererEN as TendererENCompetitor,
+	IDTenderer as [Код Конкурента],
+	[Назва Учасника | Код Учасника] as [Конкурент | Код Конкурента],
+	[Tenderer | Tenderer code] as [Competitor | Competitor code],
+	[Посилання на профіль в YouControl]  as [Посилання на профіль в YouControl Конкурент] 
+Resident Tenderer;	
+
+DROP Field IDTendererKey From AddTenderer;
+
+// Минимальная дата победного предложения
+Left Join (Tenderer)
+LOAD
+	 IDTendererKey,
+	 Date(Floor(Min(ДатаПредложения))) as [Дата 1 переможної пропозиції]
+Resident Bid
+Where Match(BidType, 1, 2) AND (NOT IsNull(ДатаПредложения)) AND EndAwardStatusFlag = 1 AND СтатусПротоколаОценки = 'active'
+Group By IDTendererKey;
+
+DROP Field ДатаПредложения;
+
+//Кол-во участников
+TenderTmp:
+LOAD Distinct
+	 IDTenderKey,
+	 IDTendererKey,
+	 IDLotKey
+//	 МіткаПершоїПропозиції
+Resident Bid
+Where Match(BidType, 1, 2);
+
+Left Join (Tender)
+LOAD
+	IDTenderKey as IDTender,
+	Count(DISTINCT IDTendererKey) as КоличествоУчастниковTmp
+//	Sum(МіткаПершоїПропозиції) as КоличествоНовыхУчастниковTmp
+Resident TenderTmp
+Group By IDTenderKey;
+
+Left Join (Lot)
+LOAD
+	IDLotKey as IDLot,
+	Count(DISTINCT IDTendererKey) as КоличествоУчастниковЛотаTmp
+//	Sum(МіткаПершоїПропозиції) as КоличествоНовыхУчастниковЛотаTmp
+Resident TenderTmp
+Group By IDLotKey;
+
+DROP Table TenderTmp;
+
+Left Join (Lot)
+LOAD
+	IDLotKey,
+	Alt(КоличествоУчастниковЛотаTmp, 0) as КоличествоУчастниковЛота,
+//	if(КоличествоУчастниковЛотаTmp=1, '=1', if(КоличествоУчастниковЛотаTmp>1, '>1')) as Количество1Участников,
+//	Alt(КоличествоНовыхУчастниковЛотаTmp, 0) as КоличествоНовыхУчастниковЛота,
+	Alt(LotDisqualQty, 0) as [Количество дисквалификаций лота]
+Resident Lot;	
+
+DROP Fields КоличествоУчастниковЛотаTmp, /*КоличествоНовыхУчастниковЛотаTmp,*/ LotDisqualQty;
+
+Left Join (Tender)
+LOAD 
+	IDTender,
+//	Round(Floor(RangeSum(Экономия/СуммаТендера), 0.001), 0.01)*100 as [% економії], 
+	Alt(КоличествоУчастниковTmp, 0) as КоличествоУчастников
+Resident 	Tender;
+
+DROP Fields КоличествоУчастниковTmp;
+
+//// Определение CPV группы с 2 знаками для каждого лота
+CPVLotTmp:
+LOAD Distinct
+	 IDLotKey,
+	 IDClassCPV 
+Resident TenderItem
+Where NOT IsNull(IDLotKey);
+
+//CPVLot_Tmp:
+//NoConcatenate
+//LOAD
+//	 IDLotKey,
+//	 MinString(IDClassCPV) as IDClassCPV
+//Resident CPVLotTmp
+//Group By IDLotKey;
+//
+//Left Join (CPVLot_Tmp)
+//LOAD Distinct
+//	 IDClassCPV,
+//	 Подразделения,
+//	 Divisions
+//Resident ItemCPV
+//Where NOT IsNull(Подразделения);
+//
+//Left Join (Lot)
+//LOAD
+//	 IDLotKey,
+//	 MinString(Подразделения) as [Підрозділ CPV лота (агреговано)],
+//	 MinString(Divisions) as [CPV division of lot (aggregated)]
+//Resident CPVLot_Tmp
+//Group By IDLotKey;
+//
+//DROP Table CPVLot_Tmp;
+
+//// Определение Мин глубины 2017 (4 знака + 336)
+//
+//CPVTenderTmp:
+//LOAD Distinct
+//	 IDTenderKey,
+//	 IDClassCPV 
+//Resident TenderItem;
+
+DROP Fields IDTenderKey, IDClassCPV From TenderItem;
+
+//CPVTenderMask:
+//NoConcatenate
+//LOAD Distinct
+//	IDTenderKey,
+//	if(IDClassCPV Like '336*', Left(IDClassCPV, 3), Left(IDClassCPV, 4)) as IDClassCPV
+//Resident CPVTenderTmp
+//Where Mid(IDClassCPV, 4, 1)<>0 OR IDClassCPV Like '336*';	
+//
+//Left Join (CPVTenderMask)
+//LOAD
+//	 IDTenderKey,
+//	 Count(IDClassCPV) as CPVQty
+//Resident CPVTenderMask	 
+//Group By IDTenderKey;	
+//
+//Left Join (CPVTenderTmp)
+//LOAD Distinct	
+//	 IDTenderKey,
+//	 1 as ExclTenderFlag
+//Resident CPVTenderMask
+//Where CPVQty > 1;	 
+//
+//DROP Table 	CPVTenderMask;
+//
+//CPVTender4_Tmp:
+//NoConcatenate
+//LOAD 
+//	 IDTenderKey,
+//	 IDClassCPV as IDClassCPV1,
+//	 if(ExclTenderFlag <> 1 AND (IDClassCPV Like '336*' OR  Mid(IDClassCPV, 4, 1)<>0), IDClassCPV) as IDClassCPV;
+//	 
+//LOAD
+//	 IDTenderKey,
+//	 MinString(IDClassCPV) as IDClassCPV,
+//	 Only(ExclTenderFlag) as ExclTenderFlag
+//Resident CPVTenderTmp
+//Group By IDTenderKey;
+//
+//DROP Table CPVTenderTmp;
+//
+//Left Join (CPVTender4_Tmp)
+//LOAD 
+//	 IDClassCPV,
+//	 Группы,
+//	 Groups 
+//Resident 	ItemCPV
+//Where NOT IsNull(Группы) AND IDClassCPV Like '336*';
+//
+//Left Join (CPVTender4_Tmp)
+//LOAD
+//	 Left(Классы, 10) as IDClassCPV,
+//	 Классы,
+//	 Classes 
+//Resident 	ItemCPV
+//Where NOT IsNull(Классы) AND NOT IDClassCPV Like '336*';
+//
+//Left Join (CPVTender4_Tmp)
+//LOAD
+//	 Left(Категории, 10) as IDClassCPV,
+//	 Классы as Классы1,
+//	 Classes as Classes1
+//Resident 	ItemCPV
+//Where NOT IsNull(Категории) AND NOT IDClassCPV Like '336*';
+//
+//Left Join (CPVTender4_Tmp)
+//LOAD
+//	 Left(Подкатегории, 10) as IDClassCPV,
+//	 Классы as Классы2,
+//	 Classes as Classes2
+//Resident 	ItemCPV
+//Where NOT IsNull(Подкатегории) AND NOT IDClassCPV Like '336*';
+//
+//Left Join (CPVTender4_Tmp)
+//LOAD 
+//	 IDClassCPV,
+//	 Подразделения,
+//	 Divisions
+//Resident ItemCPV
+//Where IDClassCPV like '99999999*';
+//
+//Left Join (Tender)
+//LOAD
+//	 IDTenderKey,
+//	 if(Len(Группы&Классы&Классы1&Классы2&Подразделения)>1, Группы&Классы&Классы1&Классы2&Подразделения, '-') as [Минимальная глубина CPV (2017 год)],
+//	 if(Len(Groups&Classes&Classes1&Classes2&Divisions)>1, Groups&Classes&Classes1&Classes2&Divisions, '-') as [CPV minimum deep (2017 Year)]
+//Resident CPVTender4_Tmp;
+//
+//DROP Table CPVTender4_Tmp;
+
+//// Определение CPV группы с 2 знаками для каждого тендера
+//Left Join (Tender)
+//LOAD
+//	 IDTenderKey,
+//	 MinString([Підрозділ CPV лота (агреговано)]) as [Классификация тендера CPV2]
+//Resident Lot
+//Group By IDTenderKey;
+//
+//// Определение типа CPV тендера
+//Left Join (Tender)
+//LOAD Distinct
+//	 Подразделения as [Классификация тендера CPV2],
+//	 CPVType
+//Resident ItemCPV;
+//
+//Left Join (Tender)
+//LOAD 
+//	 CPVType,
+//	 [CPV type] as [CPV tender type]
+//Resident CPVType;
+//
+//DROP Field CPVType From Tender;
+
+// ТЗ https://docs.google.com/document/d/13W5yvmZG-_7CPGhj4SZjSgLCV3ZLsvTcmL1eKN8-qu0
+
+Left Join (CPVLotTmp) 	
+LOAD Distinct
+	 IDLotKey,
+	 1 as Flag9
+Resident CPVLotTmp
+Where IDClassCPV = '99999999-9';	
+
+Left Join (CPVLotTmp) 
+LOAD
+	 IDLotKey,
+	 Count(DISTINCT Text(Left(IDClassCPV, 2))) as Qty2,
+	 Count(DISTINCT Text(Left(IDClassCPV, 3))) as Qty3,
+	 Count(DISTINCT Text(Left(IDClassCPV, 4))) as Qty4,
+	 Count(DISTINCT Text(Left(IDClassCPV, 5))) as Qty5,
+	 Count(DISTINCT Text(Left(IDClassCPV, 6))) as Qty6,
+	 Count(DISTINCT Text(Left(IDClassCPV, 7))) as Qty7,
+	 Count(DISTINCT Text(Left(IDClassCPV, 8))) as Qty8
+Resident CPVLotTmp
+Group By IDLotKey;
+
+CPVLot_Tmp:
+NoConcatenate
+LOAD Distinct
+	 IDLotKey,
+	 Text(
+	 	if(Flag9=1, '99999999-9',
+	 		if(Qty2=1 AND Qty3=1 AND Qty4=1 AND Qty5=1 AND Qty6=1 AND Qty7=1 AND Qty8=1, IDClassCPV,
+	 			if(Qty6=1, Left(IDClassCPV, 6),
+	 				if(Qty5=1, Left(IDClassCPV, 5),
+	 					if(Qty4=1, Left(IDClassCPV, 4),
+	 						if(Qty3=1, Left(IDClassCPV, 3),
+	 							if(Qty2=1, Left(IDClassCPV, 2)
+	 							)
+	 						)
+	 					)
+	 				)
+	 			)	
+	 		)
+	 	)
+	 ) as IDClassCPV,
+	 Text(
+	 	if(Flag9=1, '99999999-9',
+	 		if(Qty3=1 OR Qty4=1 OR Qty5=1 OR Qty6=1 OR Qty7=1 OR Qty8=1, Left(IDClassCPV, 3),
+	 		)
+	 	)
+	 ) as IDClassCPVGroup,
+	 Text(
+	 	if(Flag9=1, '99999999-9',
+	 		if(Qty4=1 OR Qty5=1 OR Qty6=1 OR Qty7=1 OR Qty8=1, Left(IDClassCPV, 4),
+	 		)
+	 	)
+	 ) as IDClassCPVClass
+Resident CPVLotTmp;
+
+DROP Table CPVLotTmp;	
+
+Left Join (CPVLot_Tmp)
+LOAD Distinct
+	 Text(Left(Подразделения, 2)) as IDClassCPV,
+	 Подразделения,
+	 Divisions
+Resident ItemCPV;
+
+Left Join (CPVLot_Tmp)
+LOAD Distinct
+	 IDClassCPV,
+	 Подразделения as Подразделения9,
+	 Divisions as Divisions9
+Resident ItemCPV
+Where IDClassCPV like '99999999*';
+
+Left Join (CPVLot_Tmp)
+LOAD Distinct
+	 Text(Left(Группы, 3)) as IDClassCPV,
+	 Группы,
+	 Groups 
+Resident 	ItemCPV
+Where NOT IsNull(Группы);
+
+Left Join (CPVLot_Tmp)
+LOAD Distinct
+	 Text(Left(Классы, 4)) as IDClassCPV,
+	 Классы,
+	 Classes
+Resident 	ItemCPV
+Where NOT IsNull(Классы);
+
+Left Join (CPVLot_Tmp)
+LOAD Distinct
+	 Text(Left(Категории, 5)) as IDClassCPV,
+	 Категории,
+	 Categories
+Resident 	ItemCPV
+Where NOT IsNull(Категории);
+
+Left Join (CPVLot_Tmp)
+LOAD Distinct
+	 Text(Left(Подкатегории, 6)) as IDClassCPV,
+	 Подкатегории,
+	 Subcategories
+Resident 	ItemCPV
+Where NOT IsNull(Подкатегории) AND Подкатегории like '??????00*';
+
+Left Join (CPVLot_Tmp)
+LOAD Distinct
+	 IDClassCPV,
+	 [Классификация CPV], 
+     [CPV Classification]
+Resident 	ItemCPV
+Where NOT IDClassCPV like '99999999*';
+
+/////////////CPV Lot Group//////////////////
+//Left Join (CPVLot_Tmp)
+//LOAD Distinct
+//	 Text(Left(Группы, 3)) as IDClassCPVGroup,
+//	 Группы as ГруппыGroup,
+//	 Groups as GroupsGroup
+//Resident 	ItemCPV
+//Where NOT IsNull(Группы);
+
+/////////////CPV Lot Class//////////////////
+Left Join (CPVLot_Tmp)
+LOAD Distinct
+	 Text(Left(Классы, 4)) as IDClassCPVClass,
+	 Классы as КлассыClass,
+	 Classes as ClassesClass
+Resident 	ItemCPV
+Where NOT IsNull(Классы);
+
+Left Join (Lot)
+LOAD
+	 IDLotKey,
+	 if(Len(Подразделения&Подразделения9&Группы&Классы&Категории&Подкатегории&[Классификация CPV])>1, Подразделения&Подразделения9&Группы&Классы&Категории&Подкатегории&[Классификация CPV], '-') as [Класифікація CPV лота],
+	 if(Len(Divisions&Divisions9&Groups&Classes&Categories&Subcategories&[CPV Classification])>1, Divisions&Divisions9&Groups&Classes&Categories&Subcategories&[CPV Classification], '-') as [Lot Classification CPV],
+	 
+//	 if(Len(Подразделения9&ГруппыGroup)>1, Подразделения9&ГруппыGroup, '-') as [Група CPV лота (агреговано)],
+//	 if(Len(Divisions9&GroupsGroup)>1, Divisions9&GroupsGroup, '-') as [CPV Group of lot (aggregated)],
+	 
+	 if(Len(Подразделения9&КлассыClass)>1, Подразделения9&КлассыClass, '-') as [Клас CPV лота (агреговано)],
+	 if(Len(Divisions9&ClassesClass)>1, Divisions9&ClassesClass, '-') as [CPV Class of lot (aggregated)]
+Resident CPVLot_Tmp;
+
+DROP Table CPVLot_Tmp;
+
+Left Join (Lot)
+LOAD
+	 IDLotKey,
+	 if(WildMatch([Класифікація CPV лота], '3368*', '331*'), 1, 
+	 	if([Класифікація CPV лота] Like '336*' AND NOT [Класифікація CPV лота] Like '3368*', 2
+	 		)) as ItemType
+Resident Lot;	 
+
+ItemTypes:
+Left Keep (Lot)
+LOAD * Inline [
+ItemType, Тип товару, Item Type
+1,		  Медичне обладнання і засоби медичного призначення,	Medical equipment and Medical devices
+2,		  Лікарські засоби,										Medicines
+];
+
+
+
+//DROP Field СтатусТендера From Lot; 
+//
+//Left Join (Lot)
+//LOAD
+//	[Підрозділ CPV лота (агреговано)],
+//	FracCPVLotEco
+//Resident FracCPVLotEco;
+//
+//DROP Table FracCPVLotEco;	
+
+
+
+//// Определение Организаторов, которые закупают через Неконкурентные процедуры
+//TempOrgs:
+//LOAD	 
+//	 IDOrganizatorKey
+//Where 	PMStr='limited'; 
+//
+//LOAD	
+//	 IDOrganizatorKey,
+//	 Concat(DISTINCT procurementMethod) as PMStr
+//Resident Tender
+//Group By IDOrganizatorKey;
+//
+//Left Join (Organizator)
+//LOAD
+//	 IDOrganizatorKey,
+//	 1 as _LimitedOrgs
+//Resident 	TempOrgs;
+//
+//DROP Table TempOrgs; 
+//
+//// Определение Участников, которые принимаю участие в Неконкурентных процедурах
+//TempTenderers_:
+//LOAD Distinct	
+//	 IDTendererKey,
+//	 IDTenderKey
+//Resident Bid;
+//
+//Left Join (TempTenderers_)
+//LOAD
+//	 IDTenderKey,
+//	 procurementMethod
+//Resident Tender;	 
+//
+//TempTenderers:
+//LOAD	 
+//	 IDTendererKey
+//Where 	PMStr='limited'; 
+//
+//LOAD	
+//	 IDTendererKey,
+//	 Concat(DISTINCT procurementMethod) as PMStr
+//Resident TempTenderers_
+//Group By IDTendererKey;
+//
+//DROP Table TempTenderers_;
+//
+//Left Join (Tenderer)
+//LOAD
+//	 IDTendererKey,
+//	 1 as _LimitedTenderers
+//Resident 	TempTenderers;
+//
+//DROP Table TempTenderers; 
+
+DROP Field IDTenderKey From Bid;
+
+DIRECTORY [..\04_DataBase\02_QVD_DB\01_Dictionary\];
+
+Left Join (Tenderer)
+LOAD
+	 РегионУчастника,
+	 1 as UARegion_
+Resident TendererRegionCoordinates;	 
+
+// Возраст компании 
+// ТЗ https://docs.google.com/spreadsheets/d/1DvESWrUgJGj-ubOoOMTVZs5hvciFB-rlt8PpnhSTytA
+// https://docs.google.com/spreadsheets/d/1a8jsXpU4Ln6tVXyZ8NBeTej8xjn4_AlhllQBwyKjQNw
+// Определение г. Киев Организаторах и Участниках
+Left Join (Tenderer)
+LOAD
+	 IDTendererKey,
+	 if(WildMatch(Lower(ГородУчастника), '*київ') AND NOT WildMatch(Lower(ГородУчастника), '*киликиїв*'), 1) as UATendererCapital_,
+	 Round(Floor(($(#vCurrentDate)-[Дата реєстрації юридичної особи])/365, 0.01), 0.1) as [Вік компанії],
+	 [Дата 1 переможної пропозиції] - [Дата реєстрації юридичної особи] as [Днів до подачі першої переможної пропозиції],
+	 if(_Resident<>1 AND NOT WildMatch(СтранаУчастника, 'укр*', 'ukr*') AND UARegion_<>1 AND Len(IDTenderer)<>8 AND ((Len(IDTenderer)=10 AND Left(IDTenderer, 1)=0) OR Len(IDTenderer)<>10), 0) as Resident_
+Resident Tenderer;
+
+Left Join (Tenderer)
+LOAD
+	 IDTendererKey,
+	 Alt(UARegion_, 0) as UARegion,
+	 Alt(UATendererCapital_, 0) as UATendererCapital,
+	 Alt(_Resident, Resident_, 1) as Resident
+Resident Tenderer;	 
+
+DROP Fields UARegion_, UATendererCapital_, _Resident, Resident_;
+
+
+Left Join (Organizator)
+LOAD
+	 IDOrganizatorKey,
+	 if(WildMatch(Lower(ГородОрганизатора), '*київ', '*киев') AND NOT WildMatch(Lower(ГородОрганизатора), '*киликиїв*'), 1, 0) as UAOrgCapital
+Resident Organizator;
+
+//Left Join (Organizator)
+//LOAD
+//	 IDOrganizatorKey,
+//	 Alt(UAOrgCapital_, 0) as UAOrgCapital
+//Resident Organizator;
+//
+//DROP Field UAOrgCapital_;
+
+// Определение Региона участника для географии 
+Left Join (Tenderer)
+LOAD
+	 IDTendererKey,
+	 if(UARegion=1, РегионУчастника, 
+	 	if(IsNull(РегионУчастника) OR РегионУчастника='', '-',
+	 		if(Resident=0, 'Нерезидент', 'Не визначений'))) as [Регіон учасника гео],
+	 if(UARegion=1, [Region of Tenderer_], 
+	 	if(IsNull(РегионУчастника) OR РегионУчастника='', '-',
+	 		if(Resident=0, 'Nonresident', 'Unspecified'))) as [Region of Tenderer geo]		
+Resident Tenderer;	
+
+DROP Field [Region of Tenderer_];
+
+// Цена за единицу
+// ТЗ https://docs.google.com/document/d/1K7Vy3BY73TD_Ngl43klOJeD5_QQSvFixRuMKTDUwLk0
+LotItem_:
+LOAD
+	 IDLotKey,
+	 Count(IDItemKey) as LotCountItem
+Resident TenderItem
+Group By IDLotKey;	 
+
+LotItem:
+LOAD
+	 IDLotKey
+Resident LotItem_
+Where LotCountItem = 1;
+
+DROP Table LotItem_;
+
+Left Join (LotItem)
+LOAD
+	 IDLotKey,
+	 Количество,
+	 [Од. виміру] as [Одиниця виміру],
+	 Unit as [Unit of measurement]
+Resident TenderItem;
+
+Left Join (LotItem)
+LOAD
+ 	 IDLotKey,
+ 	 СуммаПредложения,
+     BidAmountEUR
+Resident Bid
+Where EndAwardStatusFlag = 1 AND Match(BidType, 1, 2) AND СтатусПротоколаОценки = 'active'; 
+
+//LET vLotsQty = NoOfRows('Lot');
+//TRACE Befor join from LotItem = $(vLotsQty);
+
+Left Join (Lot)
+LOAD
+	 IDLotKey,
+	 Round(Floor(СуммаПредложения/Количество, 0.001), 0.01) as [Ціна за одиницю],
+	 Round(Floor(BidAmountEUR/Количество, 0.001), 0.01) as [Price per unit (EUR)],
+	 if(NOT IsNull(СуммаПредложения/Количество), 1) as IsPricePerUnit,
+	 [Одиниця виміру],
+	 [Unit of measurement]
+Resident LotItem
+Where NOT IsNull(СуммаПредложения);	
+
+DROP Table LotItem; 	
+
+//============================================
+
+// Определение победителя лота
+Winners:
+Load
+	IDLotKey,
+    IDTendererKey,
+    СуммаПредложения as [Сума переможної пропозиції],
+    BidAmountEUR as WinBidAmountEUR
+Resident Bid
+Where СтатусПротоколаОценки='active' AND Match(BidType, 1, 2) AND EndAwardStatusFlag=1;  
+
+Left Join (Winners)
+Load
+	IDTendererKey,
+    Участник&' | '&IDTenderer as КодУчасник,
+    TendererEN&' | '&IDTenderer as CodeTendererEN
+Resident  Tenderer;   
+
+Left Join (Lot)
+Load
+	IDLotKey,
+    Concat(DISTINCT КодУчасник, ', ') as КодПереможець,
+    Concat(DISTINCT CodeTendererEN, ', ') as CodeWinner,
+    SUM([Сума переможної пропозиції]) as [Сума переможної пропозиції],
+    SUM(WinBidAmountEUR) as WinBidAmountEUR
+Resident Winners
+Group By IDLotKey;    
+
+Drop Table Winners;
+
+Left Join (Tender)
+Load
+	 IDTenderKey,
+     Concat(DISTINCT КодПереможець, ', ') as [КодПереможець тендера],
+     Concat(DISTINCT CodeWinner, ', ') as [CodeWinner of tender]
+Resident Lot
+Group By IDTenderKey;
+
+// Определение мин предложения лота
+Left Join (Lot)
+Load
+	 IDLotKey,
+     Min(СуммаПредложения) as [Мін сума пропозиції лота Bid],
+     Min(BidAmountEUR) as MinBidAmountEURBid
+Resident Bid
+Where BidType = 1 AND СтатусПредложения <> 'invalid'
+Group By IDLotKey;     
+
+Left Join (Lot)
+Load
+	 IDLotKey,
+     Min(СуммаПредложения) as [Мін сума пропозиції лота Award],
+     Min(BidAmountEUR) as MinBidAmountEURAward
+Resident Bid
+Where BidType = 2 AND СтатусПротоколаОценки='active'
+Group By IDLotKey; 
+
+DROP Fields СуммаПредложения, BidAmountEUR;
+
+Left Join (Lot)
+Load
+	IDLotKey,
+    Alt([Мін сума пропозиції лота Bid], [Мін сума пропозиції лота Award]) as [Сума мінімальної пропозиції],
+    Alt(MinBidAmountEURBid, MinBidAmountEURAward) as MinBidAmountEUR
+Resident  Lot
+Where LotAwardFlag = 1;  
+
+Drop Fields [Мін сума пропозиції лота Bid], [Мін сума пропозиції лота Award], MinBidAmountEURBid, MinBidAmountEURAward;
+
+
+// Определение суммы договора лота
+Left Join (Lot)
+LOAD
+	 IDLotKey,
+     [Сума договору (згідно договору)] as [Поточна сума договору лота],
+     ContractAmountEUR as ContractAmountEURlot,
+     [Є додаткова угода] as IsContractChange
+Resident Contract;
+
+//DROP Table ContractLot;	
+
+DROP Field IDLotKey From Contract;
+
+RENAME Field [Сума договору (згідно договору)] to [Поточна сума договору];
+
+// Принадлежность к НП
+// ТЗ https://docs.google.com/document/d/1uhiV8GC71y0fZk-f1oSpw-EghxrgwkNkxj7BUE5UAYc
+Left Join (TenderItem)
+LOAD
+	 IDItemKey,
+	 TextBetween(MapSubString('INNinNPMap', Lower(МНН)), '║', '║') as [Належність до НП]
+Resident TenderItem
+Where NOT IsNull(МНН);//МНН <> '-';	 
+
+// Определение существует ли торговое наименование
+// ТЗ https://docs.google.com/document/d/1R0Tg4oHmRWIVcyGzvzL5TissSNUCP2vWOqUZCMetI8c
+SaleName_:
+LOAD
+	 IDLotKey,
+	 Lower(Лот) as Лот,
+	 Lower(ОписаниеЛота) as ОписаниеЛота
+Resident Lot
+Where ItemType = 2;//[Тип товару] = 'Лікарські засоби';
+
+Left Join (SaleName_)
+LOAD Distinct
+	 IDLotKey,
+	 Lower(Товар) as Товар
+Resident TenderItem;	
+
+SaleName:
+LOAD
+	 IDLotKey,
+	 if(FindOneOf(Лот&ОписаниеЛота&Товар, '®™') OR TextBetween(MapSubString('DRLZMap', Лот&ОписаниеЛота&Товар), '║', '║'), 1, 0) as [Є торгівельне найменування]
+Resident SaleName_;
+
+DROP Table SaleName_;	 
+
+Left Join (Lot)	 
+LOAD
+	 IDLotKey,
+	 Max([Є торгівельне найменування]) as [Є торгівельне найменування]
+Resident SaleName
+Group By IDLotKey;
+
+DROP Table SaleName;	 
+
+
+// Определение существует ли гомеопатическое ЛС
+// ТЗ https://docs.google.com/document/d/1oduTOzYxmmXv4JEAle0zJZKIqA717C6VCqELzjKEIvY
+HomeoMed_:
+LOAD
+	 IDLotKey,
+	 Lower(Лот) as Лот,
+	 Lower(ОписаниеЛота) as ОписаниеЛота
+Resident Lot
+Where /*[Тип товару] = 'Лікарські засоби'*/ ItemType = 2 AND [Є торгівельне найменування] = 1;
+
+Left Join (HomeoMed_)
+LOAD Distinct
+	 IDLotKey,
+	 Lower(Товар) as Товар
+Resident TenderItem;
+
+HomeoMed:
+LOAD
+	 IDLotKey,
+	 if(TextBetween(MapSubString('DRLZHomeoMap', Лот&ОписаниеЛота&Товар), '║', '║'), 1, 0) as [Є гомеопатичний ЛЗ]
+Resident HomeoMed_;
+
+DROP Table HomeoMed_;	
+
+Left Join (Lot)	 
+LOAD
+	 IDLotKey,
+	 Max([Є гомеопатичний ЛЗ]) as [Є гомеопатичний ЛЗ]
+Resident HomeoMed
+Group By IDLotKey;
+
+DROP Table HomeoMed;
+
+
+// Определение принадлежности к ЛС растительного происхождения
+// ТЗ https://docs.google.com/document/d/1yKm1O4uBKt7h9HDbQJh5eslR77Y0fAo3l3B5mpEfoKU
+ItemVeg:
+LOAD
+	 IDLotKey
+Resident Lot	 
+Where ItemType = 2;//[Тип товару] = 'Лікарські засоби';
+
+Left Join (ItemVeg)
+LOAD 
+	 IDLotKey,
+	 IDItemKey,
+	 Lower(МНН) as МНН
+Resident TenderItem;
+
+INNVeg:
+LOAD 
+	МНН, 
+    [ЛЗ рослинного походження]
+FROM DRLZ.qvd (qvd);
+
+Left Join (ItemVeg)
+LOAD 
+	МНН, 
+	if(Concat(DISTINCT [ЛЗ рослинного походження]) = 'Так', 'Повністю',
+	if(Concat(DISTINCT [ЛЗ рослинного походження]) = 'Ні', 'Ні', 'Частково')) as [Належність до ЛЗ рослинного походження]
+Resident INNVeg
+Group By МНН;
+
+DROP Table INNVeg;
+
+Left Join (TenderItem)
+LOAD
+	 IDItemKey,
+	 [Належність до ЛЗ рослинного походження]
+Resident ItemVeg;
+
+DROP Table ItemVeg;	 
+
+// Определение принадлежности к ЛС растительного происхождения (на уровне лота)
+// ТЗ https://docs.google.com/document/d/1UBpXFIRAjb7ZgBXEG7HzDYs8Uc9RbyqHutJLHRzKBso
+VegMedLot_:
+LOAD
+	 IDLotKey,
+	 Lower(Лот) as Лот,
+	 Lower(ОписаниеЛота) as ОписаниеЛота
+Resident Lot
+Where ItemType = 2; //[Тип товару] = 'Лікарські засоби';
+
+Left Join (VegMedLot_)
+LOAD Distinct
+	 IDLotKey,
+	 Lower(Товар) as Товар
+Resident TenderItem;
+
+Left Join (VegMedLot_)
+LOAD Distinct
+	 IDLotKey,
+	 1 as FullMedVegFlag
+Resident TenderItem
+Where [Належність до ЛЗ рослинного походження] = 'Повністю';
+
+VegMedLot:
+LOAD
+	 IDLotKey,
+	 if(TextBetween(MapSubString('DRLZSaleVegMap', Лот&ОписаниеЛота&Товар), '║', '║') OR FullMedVegFlag = 1, 1, 0) as [Є ЛЗ рослинного походження]
+Resident VegMedLot_;
+
+DROP Table VegMedLot_;	
+
+Left Join (Lot)	 
+LOAD
+	 IDLotKey,
+	 Max([Є ЛЗ рослинного походження]) as [Є ЛЗ рослинного походження]
+Resident VegMedLot
+Group By IDLotKey;
+
+DROP Table VegMedLot;
+///$tab 6 Календарь
+Календарь:
+LOAD
+    Дата,
+    num(Дата) as DateNum,
+//	Day(Дата) as "День",
+    Year(Дата) as "Рік",
+    Month(Дата) as "Місяць",
+//    WeekDay(Дата) as "День тижня",
+//    Year(Дата)&num(Month(Дата),'00') as "РікМісяць",
+    Dual(Year(Дата)&'-'&Month(Дата), Year(Дата) * 100 + Month(Дата)) as "Рік-Місяць",
+//    Dual(Month(Дата) & '-' & Year(Дата), Month(Дата) * 10000 + Year(Дата)) as "Місяць-Рік",
+//	Dual(WeekName(Дата,0), WeekYear(Дата) * 100 + Week(Дата)) as "Рік-Тиждень",
+//	WeekYear(Дата) & Num(Week(Дата), '00') as РікТиждень,
+//    'Т' & Week(Дата) as "Тиждень",
+//    Week(Дата) as ТижденьНомер,
+    'К' & Ceil(Month(Дата)/3) AS "Квартал",   
+    Dual(Year(Дата)&'-'&'К' & Ceil(Month(Дата)/3), Year(Дата) & num(Ceil(Month(Дата)/3), '00')) as "Рік-Квартал"
+
+    
+    ,if('$(vCurrentDate)'-Дата=1, 1) as PrevDay
+    ,if('$(vCurrentDate)'-Дата<7, 7) as _Last7
+    ,if('$(vCurrentDate)'-Дата<30, 30) as _Last30
+    ,if('$(vCurrentDate)'-Дата<60, 60) as _Last60
+    
+ 	Where Дата>='$(vMinTenderDate)' OR Exists(TenderDate, Дата);
+LOAD Date('$(vMinDate)' + RecNo() - 1) as Дата
+AutoGenerate vMaxDate - vMinDate + 1;
+
+DROP Table DistDates;
+
+SelectCalendar:
+LOAD
+	 Дата,
+	 _Last7 as Днів,
+	 _Last7 as Days
+Resident Календарь
+Where NOT IsNull(_Last7);
+
+Concatenate(SelectCalendar)
+LOAD
+	 Дата,
+	 _Last30 as Днів,
+	 _Last30 as Days
+Resident Календарь
+Where NOT IsNull(_Last30);	
+
+Concatenate(SelectCalendar)
+LOAD
+	 Дата,
+	 _Last60 as Днів,
+	 _Last60 as Days
+Resident Календарь
+Where NOT IsNull(_Last60); 
+
+
+
+DROP Fields _Last7, _Last30, _Last60 From Календарь;
+
+// Для публикации договора
+DistPubContractDates:
+LOAD 
+	 Num(Fieldvalue('Дата публікації договору',RecNo())) as [Дата публікації договору_]
+AUTOGENERATE FieldValueCount('Дата публікації договору');
+
+MinMaxPubContractDates:
+LOAD 
+	Min([Дата публікації договору_]) as MinPubContractDate,
+	Max([Дата публікації договору_]) as MaxPubContractDate
+RESIDENT DistPubContractDates;
+
+LET vMinPubContractDate = Peek('MinPubContractDate', -1, 'MinMaxPubContractDates');
+LET vMaxPubContractDate = Peek('MaxPubContractDate', -1, 'MinMaxPubContractDates');
+
+DROP Tables MinMaxPubContractDates;
+
+ContractPubCalendar:
+LOAD
+    [Дата публікації договору],
+    Dual(Year([Дата публікації договору])&'-'&Month([Дата публікації договору]), Year([Дата публікації договору]) * 100 + Month([Дата публікації договору])) as [Рік-Місяць публікації договору],
+    Year([Дата публікації договору]) as [Рік публікації договору],
+    Month([Дата публікації договору]) as [Місяць публікації договору]
+    ,if('$(vCurrentDate)'-[Дата публікації договору]<7, 7) as _LastContractPubDate7
+    ,if('$(vCurrentDate)'-[Дата публікації договору]<30, 30) as _LastContractPubDate30
+    ,if('$(vCurrentDate)'-[Дата публікації договору]<60, 60) as _LastContractPubDate60
+;
+LOAD Date('$(vMinPubContractDate)' + RecNo() - 1) as [Дата публікації договору]
+AutoGenerate vMaxPubContractDate - vMinPubContractDate + 1;
+
+LastContractPubCalendar:
+LOAD
+	 [Дата публікації договору],
+	 _LastContractPubDate7 as [Днів від публікації договору],
+	 _LastContractPubDate7 as [Days from Contract Publication Date]
+Resident ContractPubCalendar
+Where NOT IsNull(_LastContractPubDate7);
+
+Concatenate(LastContractPubCalendar)
+LOAD
+	 [Дата публікації договору],
+	 _LastContractPubDate30 as [Днів від публікації договору],
+	 _LastContractPubDate30 as [Days from Contract Publication Date]
+Resident ContractPubCalendar
+Where NOT IsNull(_LastContractPubDate30);	
+
+Concatenate(LastContractPubCalendar)
+LOAD
+	 [Дата публікації договору],
+	 _LastContractPubDate60 as [Днів від публікації договору],
+	 _LastContractPubDate60 as [Days from Contract Publication Date]
+Resident ContractPubCalendar
+Where NOT IsNull(_LastContractPubDate60); 
+
+
+DROP Fields _LastContractPubDate7, _LastContractPubDate30, _LastContractPubDate60 From ContractPubCalendar;
+
+
+// Англ. названия периодов
+
+SET MonthNames='Jan;Feb;Mar;Apr;May;Jun;Jul;Aug;Sep;Oct;Nov;Dec';
+SET DayNames='Mon;Tue;Wed;Thu;Fri;Sat;Sun';
+
+Left Join (Календарь)
+LOAD	
+	Дата,
+	Дата as Date,
+    Year(Дата) as "Year",
+    Month(Дата) as "Month",
+//    WeekDay(Дата) as "WeekDay",
+//    Year(Дата)&num(Month(Дата),'00') as "YearMonth",
+    Dual(Year(Дата)&'-'&Month(Дата), Year(Дата) * 100 + Month(Дата)) as "Year-Month",
+//    Dual(Month(Дата) & '-' & Year(Дата), Month(Дата) * 10000 + Year(Дата)) as "Month-Year",
+//	Dual(WeekName(Дата,0), WeekYear(Дата) * 100 + Week(Дата)) as "Year-Week",
+//	WeekYear(Дата) & Num(Week(Дата), '00') as YearWeek,
+//    'W' & Week(Дата) as "Week",
+    'Q' & Ceil(Month(Дата)/3) AS "Quarter",
+    Dual(Year(Дата)&'-'&'Q' & Ceil(Month(Дата)/3), Year(Дата) & num(Ceil(Month(Дата)/3), '00')) as "Year-Quarter"
+//    Year(Дата) & num(Ceil(Month(Дата)/3), '00') as YearQuarter,
+//    Dual('Q' & Ceil(Month(Дата)/3) & '-' & Year(Дата), Num(Ceil(Month(Дата)/3), '00') & Year(Дата)) as "Quarter-Year",
+//    'HY' & Ceil(Month(Дата)/6) AS "Halfyear",
+//    Dual(Year(Дата)&'-'&'HY' & Ceil(Month(Дата)/6), Year(Дата) & num(Ceil(Month(Дата)/6), '00')) as "Year-Halfyear",
+//    Dual('HY' & Ceil(Month(Дата)/6) & '-' & Year(Дата), Num(Ceil(Month(Дата)/6), '00') & Year(Дата)) as "Halfyear-Year"
+;
+LOAD Date('$(vMinDate)' + RecNo() - 1) as Дата
+AutoGenerate vMaxDate - vMinDate + 1;
+
+Left Join (ContractPubCalendar)
+LOAD	
+	[Дата публікації договору],
+	Year([Дата публікації договору]) as [Year of Contract Publication Date],
+    Month([Дата публікації договору]) as [Month of Contract Publication Date],
+    Dual(Year([Дата публікації договору])&'-'&Month([Дата публікації договору]), Year([Дата публікації договору]) * 100 + Month([Дата публікації договору])) as [Year-Month of Contract Publication Date]
+;
+LOAD Date('$(vMinPubContractDate)' + RecNo() - 1) as [Дата публікації договору]
+AutoGenerate vMaxPubContractDate - vMinPubContractDate + 1;
+
+DROP Table DistPubContractDates;
+
+//Дата определения Победителя 
+
+SelectWinCalendar:
+LOAD Distinct
+	 ДатаВизначенняПереможця,
+	 _LastWin7 as [Днів від визначення переможця],
+	 _LastWin7 as [Days from win]
+Resident AwardDate
+Where NOT IsNull(_LastWin7);
+
+Concatenate(SelectWinCalendar)
+LOAD Distinct
+	 ДатаВизначенняПереможця,
+	 _LastWin30 as [Днів від визначення переможця],
+	 _LastWin30 as [Days from win]
+Resident AwardDate
+Where NOT IsNull(_LastWin30);	
+
+Concatenate(SelectWinCalendar)
+LOAD Distinct
+	 ДатаВизначенняПереможця,
+	 _LastWin60 as [Днів від визначення переможця],
+	 _LastWin60 as [Days from win]
+Resident AwardDate
+Where NOT IsNull(_LastWin60); 
+
+
+DROP Fields _LastWin7, _LastWin30, _LastWin60 From AwardDate;
+///$tab 7 Параметры и Перевод
+DIRECTORY [..\04_Database\02_QVD_DB\01_Dictionary\];
+
+//перевод названий полей в модели
+//единичные поля в модели на украинском, поэтому для перевода используется укр справочник
+TranslateTable:
+Mapping
+LOAD 
+//	 F2 as FName, 
+//   F3 as FUAName
+     FName, 
+     FUAName
+FROM TranslateTable.qvd (qvd);
+//[https://docs.google.com/spreadsheets/d/e/2PACX-1vQlk9xNbavhlTLTvlbBVYH5qHCUwb1LifHtI_q1HkTcImVMuPzu-CLS5t7PULBDR0og4WaOECJT5kVd/pubhtml?gid=1653875415&single=true]
+//(html, utf8, embedded labels, table is @1)
+//where F1 > 1 and len(F1) > 0;
+
+Rename Fields using TranslateTable;
+
+
+// =======================================
+
+//Справочник перевода переменных
+TranslationsSense:
+LOAD
+//    F1 as LNo,
+//    F2 as Ref,
+//    F3 as UA,
+//    F4 as EN
+    LNo,
+    Ref,
+    UA,
+    EN
+FROM $(DIC_QVD_PATH)TranslationsSense.qvd (qvd);
+//[https://docs.google.com/spreadsheets/u/1/d/1MIqfVeJHL-hRjAhRh-92G2n9JyYIPuLBayjotEDmHKU/gviz/tq?tqx=out:html&tq&gid=0]
+//(html, utf8, embedded labels, table is @1)
+//where F1 <> 'Index' and len(F1) > 0;
+
+
+//Справочник перевода внутренних инлайн таблиц
+TranslationsInTables:
+LOAD
+//    F1 as Index,
+//    F2 as Reference,
+//    F3 as Українська,
+//    F4 as English,
+//    F5 as Condition
+    Index,
+    Reference,
+    Українська,
+    English,
+    Condition
+FROM $(DIC_QVD_PATH)TranslationsInTables.qvd (qvd);
+//[https://docs.google.com/spreadsheets/u/1/d/1MIqfVeJHL-hRjAhRh-92G2n9JyYIPuLBayjotEDmHKU/gviz/tq?tqx=out:html&tq&gid=1243845428]
+//(html, utf8, embedded labels, table is @1)
+//where F1 <> 'Index' and len(F1) > 0;
+
+
+// Справочник описания листов
+TranslationsSenseMed:
+LOAD 
+	 LNo_D, 
+     Ref_D, 
+     UA_D, 
+     EN_D
+FROM [$(DIC_QVD_PATH)TranslationsSenseMed.qvd] (qvd);
+
+
+
+//// Флаг окончания процесса перезагрузки модели
+//StartControl:
+//LOAD
+//	 0 as StartControl
+//AutoGenerate 1;
+//
+//STORE StartControl into StartControl.txt (txt);	
+//DROP Table StartControl; 
+
+
+///$tab Exit Script
+Exit Script;
+///$tab For Dev
