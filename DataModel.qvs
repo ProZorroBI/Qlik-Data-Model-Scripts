@@ -170,15 +170,25 @@ LOAD IDAward as IDAwardKey,
 FROM Award_????.qvd (qvd)
 Where Exists(IDTenderKey);
 
-AwardStaus_Tmp:
-NoConcatenate
-LOAD KeyLotBid, 
-     LastValue(СтатусПротоколаОценки) as СтатусПротоколаОценки,
-     LastValue(IDTenderKey) as IDTenderKey,
-     LastValue(IDAwardKey) as IDAwardKey
-Resident Award
-Group By KeyLotBid
-Order By ДатаПредложения;
+// Для предотвращения потребления большого объема памяти
+Left Join (Award)
+LOAD Distinct
+	IDAwardKey,
+	Left(IDAwardKey, 4) as TenderYearAward
+Resident Award;	
+
+FOR Each vTenderYear in FieldValueList('TenderYearAward')
+	AwardStaus_Tmp:
+	LOAD KeyLotBid, 
+	     LastValue(СтатусПротоколаОценки) as СтатусПротоколаОценки,
+	     LastValue(IDTenderKey) as IDTenderKey,
+	     LastValue(IDAwardKey) as IDAwardKey
+	Resident Award
+	Where TenderYearAward = $(vTenderYear)
+	Group By KeyLotBid
+	Order By ДатаПредложения;
+NEXT
+
 
 Left Join (Award)
 LOAD
@@ -392,6 +402,7 @@ Where Exists(IDTenderKey);
 Award:
 LOAD KeyLotBid, 
 	 IDTenderKey,
+	 Left(IDAward, 4) as TenderYearAward,
 	 IDLotKey,
      Timestamp(ДатаВремяЗакрытия) as ДатаПредложения, 
 	 if(СтатусПротоколаОценки='unsuccessful', ДатаЗакрытия) as ДатаДисквалификации,
@@ -1382,6 +1393,13 @@ FOR Each vFileName in FileList('Auction_????.qvd')
 	Where Exists(KeyLotBid);
 NEXT
 
+// Для предотвращения потребления большого объема памяти
+Left Join (AuctionTmp)
+LOAD Distinct
+	 IDTenderKey,
+	 Left(IDTenderKey, 4) as TenderYearAuction
+Resident AuctionTmp;	 
+
 Auction_:
 NoConcatenate
 LOAD * Inline [
@@ -1389,24 +1407,27 @@ KeyLotBid, IDTenderKey, Начальная сумма аукциона, Дата
 ];
 
 IF NoOfRows('AuctionTmp') > 0
-	Concatenate (Auction_)
-	LOAD 
-		 KeyLotBid,
-		 LastValue(IDTenderKey) as IDTenderKey,
-	     LastValue([Начальная сумма аукциона]) as [Начальная сумма аукциона], 
-	     LastValue([Дата начального предложения]) as [Дата начального предложения],
-	     LastValue([Приведенная цена]) as [Приведенная цена], 
-	     LastValue([Коэффициент коррекции]) as [Коэффициент коррекции],
-	     LastValue([Конечная сумма аукциона]) as [Конечная сумма аукциона], 
-	     LastValue([Дата конечного предложения]) as [Дата конечного предложения],
-	     LastValue([Сумма 3 раунда]) as [Сумма 3 раунда], 
-	     LastValue([Дата предложения 3 раунда]) as [Дата предложения 3 раунда],
-	     LastValue([Сумма 1 раунда]) as [Сумма 1 раунда], 
-	     LastValue([Дата предложения 1 раунда]) as [Дата предложения 1 раунда],
-	     LastValue([Сумма 2 раунда]) as [Сумма 2 раунда], 
-	     LastValue([Дата предложения 2 раунда]) as [Дата предложения 2 раунда]
-	Resident AuctionTmp     
-	Group By KeyLotBid;
+	FOR Each vTenderYear in FieldValueList('TenderYearAuction')
+		Concatenate (Auction_)
+		LOAD 
+			 KeyLotBid,
+			 LastValue(IDTenderKey) as IDTenderKey,
+		     LastValue([Начальная сумма аукциона]) as [Начальная сумма аукциона], 
+		     LastValue([Дата начального предложения]) as [Дата начального предложения],
+		     LastValue([Приведенная цена]) as [Приведенная цена], 
+		     LastValue([Коэффициент коррекции]) as [Коэффициент коррекции],
+		     LastValue([Конечная сумма аукциона]) as [Конечная сумма аукциона], 
+		     LastValue([Дата конечного предложения]) as [Дата конечного предложения],
+		     LastValue([Сумма 3 раунда]) as [Сумма 3 раунда], 
+		     LastValue([Дата предложения 3 раунда]) as [Дата предложения 3 раунда],
+		     LastValue([Сумма 1 раунда]) as [Сумма 1 раунда], 
+		     LastValue([Дата предложения 1 раунда]) as [Дата предложения 1 раунда],
+		     LastValue([Сумма 2 раунда]) as [Сумма 2 раунда], 
+		     LastValue([Дата предложения 2 раунда]) as [Дата предложения 2 раунда]
+		Resident AuctionTmp 
+		Where  TenderYearAuction = $(vTenderYear)   
+		Group By KeyLotBid;
+	NEXT
 	
 	DROP Table AuctionTmp;
 	
@@ -3357,20 +3378,24 @@ DROP Table Currency;
 DIRECTORY [..\04_DataBase\02_QVD_DB\02_Transaction\];
 
 // Определение последнего протокола оценки для каждого предложения
+// Для предотвращения потребления большого объема памяти
+FOR Each vTenderYear in FieldValueList('TenderYearAward')
+	AwardStaus_Tmp:
+	LOAD KeyLotBid, 
+	     LastValue(СтатусПротоколаОценки) as СтатусПротоколаОценки,
+	     LastValue(IsLimitedAward) as IsLimitedAward,
+	     LastValue(IDTenderKey) as IDTenderKey,
+	     LastValue(IDLotKey) as IDLotKey,
+		 LastValue(IDAwardKey) as IDAwardKey,
+		 LastValue(ОписаниеПротоколаОценки) as ОписаниеПротоколаОценки,
+		 LastValue(ПротоколОценки) as ПротоколОценки
+	Resident Award
+	Where TenderYearAward = $(vTenderYear)
+	Group By KeyLotBid
+	Order By ДатаПредложения;
+NEXT
 
-AwardStaus_Tmp:
-NoConcatenate
-LOAD KeyLotBid, 
-     LastValue(СтатусПротоколаОценки) as СтатусПротоколаОценки,
-     LastValue(IsLimitedAward) as IsLimitedAward,
-     LastValue(IDTenderKey) as IDTenderKey,
-     LastValue(IDLotKey) as IDLotKey,
-	 LastValue(IDAwardKey) as IDAwardKey,
-	 LastValue(ОписаниеПротоколаОценки) as ОписаниеПротоколаОценки,
-	 LastValue(ПротоколОценки) as ПротоколОценки
-Resident Award
-Group By KeyLotBid
-Order By ДатаПредложения;
+DROP Field TenderYearAward;
 
 // Финальный статус протокола оценки в Award
 
@@ -3655,8 +3680,8 @@ Where NOT WildMatch([Файл тендера], '*.yaml', '*.p7s');
 Left Join (Tender_)
 LOAD 
 	 IDTenderKey,
-	 Min([Дата публ. файла тендера]) as [Дата/час завантаження першого файла ТД],
-	 Max([Дата публ. файла тендера]) as [Дата/час завантаження останнього файла ТД]
+	 TimeStamp(Min([Дата публ. файла тендера])) as [Дата/час завантаження першого файла ТД],
+	 TimeStamp(Max([Дата публ. файла тендера])) as [Дата/час завантаження останнього файла ТД]
 Resident TenderDocuments
 Where NOT WildMatch([Файл тендера], '*.yaml', '*.p7s')
 Group By IDTenderKey; 
@@ -4024,8 +4049,8 @@ Group By IDLotKey
 Left Join (Award)
 LOAD
 	 IDAwardKey,
-	 Floor(Max([Дата изм. файла оценки])) as [Дата зміни останнього файла оцінки],
-	 Floor(Max([Дата публ. файла оценки])) as [Дата публікації останнього файла оцінки]
+	 Date(Floor(Max([Дата изм. файла оценки]))) as [Дата зміни останнього файла оцінки],
+	 Date(Floor(Max([Дата публ. файла оценки]))) as [Дата публікації останнього файла оцінки]
 Resident AwardDocuments
 Group By IDAwardKey;
 
@@ -4157,7 +4182,7 @@ DROP Field IDTendererKey From AddTenderer;
 MinDateBid:
 NoConcatenate
 LOAD
-	 Floor(FirstValue(ДатаПредложения)) as [Дата 1 предложения],
+	 Date(Floor(FirstValue(ДатаПредложения))) as [Дата 1 предложения],
 	 IDTendererKey,
 	 FirstValue(KeyLotBid) as KeyLotBid
 Resident Bid
@@ -4259,7 +4284,7 @@ DROP Fields КоличествоУчастниковTmp, КоличествоН�
 Left Join (Contract)
 LOAD
 	 IDContractKey,
-	 Floor(Max([Дата публ. файла контракта])) as [Дата публікації останнього файла договору]
+	 Date(Floor(Max([Дата публ. файла контракта]))) as [Дата публікації останнього файла договору]
 Resident ContractDocuments
 Where NOT [Файл контракта] Like '*.p7s'
 Group By IDContractKey;
@@ -4320,6 +4345,7 @@ DROP Table QualificationDocuments;
 CPVLotTmp:
 LOAD Distinct
 	 IDLotKey,
+	 Left(IDLotKey, 4) as TenderYear,
 	 IDClassCPV 
 Resident TenderItem
 Where NOT IsNull(IDLotKey);
@@ -4332,7 +4358,11 @@ LOAD
 Resident CPVLotTmp
 Group By IDLotKey;
 
-//DROP Table CPVLotTmp;	
+Left Join (CPVLot_Tmp)
+LOAD Distinct
+	IDLotKey,
+	TenderYear as TenderYear_
+Resident CPVLotTmp;	
 
 Left Join (CPVLot_Tmp)
 LOAD Distinct
@@ -4342,16 +4372,27 @@ LOAD Distinct
 Resident ItemCPV
 Where NOT IsNull(Подразделения);
 
+FOR Each vTenderYear in FieldValueList('TenderYear_')
+	CPVLotDiv:
+	LOAD
+		 IDLotKey,
+		 MinString(Подразделения) as [Підрозділ CPV лота (агреговано)],
+		 MinString(Divisions) as [CPV division of lot (aggregated)]
+	Resident CPVLot_Tmp
+	Where TenderYear_ = $(vTenderYear)
+	Group By IDLotKey;
+NEXT
+
+DROP Table CPVLot_Tmp;
+
 Left Join (Lot)
 LOAD
 	 IDLotKey,
-//	 if(IsNull(MinString(Группы)), MinString(Подразделения), MinString(Группы)) as [Классификация лота CPV3],
-	 MinString(Подразделения) as [Підрозділ CPV лота (агреговано)],
-	 MinString(Divisions) as [CPV division of lot (aggregated)]
-Resident CPVLot_Tmp
-Group By IDLotKey;
+	 [Підрозділ CPV лота (агреговано)],
+	 [CPV division of lot (aggregated)]
+Resident CPVLotDiv;
 
-DROP Table CPVLot_Tmp;
+DROP Table CPVLotDiv;
 
 // Определение Мин глубины 2017 (4 знака + 336)
 
@@ -4484,18 +4525,37 @@ LOAD Distinct
 Resident CPVLotTmp
 Where IDClassCPV = '99999999-9';	
 
+// Для предотвращения потребления большого объема памяти
+FOR Each vTenderYear in FieldValueList('TenderYear')
+	CPVLotQty:
+	LOAD
+		 IDLotKey,
+		 Count(DISTINCT Text(Left(IDClassCPV, 2))) as Qty2,
+		 Count(DISTINCT Text(Left(IDClassCPV, 3))) as Qty3,
+		 Count(DISTINCT Text(Left(IDClassCPV, 4))) as Qty4,
+		 Count(DISTINCT Text(Left(IDClassCPV, 5))) as Qty5,
+		 Count(DISTINCT Text(Left(IDClassCPV, 6))) as Qty6,
+		 Count(DISTINCT Text(Left(IDClassCPV, 7))) as Qty7,
+		 Count(DISTINCT Text(Left(IDClassCPV, 8))) as Qty8
+	Resident CPVLotTmp
+	Where TenderYear = $(vTenderYear)
+	Group By IDLotKey;
+NEXT
+
+
 Left Join (CPVLotTmp) 
 LOAD
 	 IDLotKey,
-	 Count(DISTINCT Text(Left(IDClassCPV, 2))) as Qty2,
-	 Count(DISTINCT Text(Left(IDClassCPV, 3))) as Qty3,
-	 Count(DISTINCT Text(Left(IDClassCPV, 4))) as Qty4,
-	 Count(DISTINCT Text(Left(IDClassCPV, 5))) as Qty5,
-	 Count(DISTINCT Text(Left(IDClassCPV, 6))) as Qty6,
-	 Count(DISTINCT Text(Left(IDClassCPV, 7))) as Qty7,
-	 Count(DISTINCT Text(Left(IDClassCPV, 8))) as Qty8
-Resident CPVLotTmp
-Group By IDLotKey;
+	 Qty2,
+	 Qty3,
+	 Qty4,
+	 Qty5,
+	 Qty6,
+	 Qty7,
+	 Qty8
+Resident CPVLotQty;
+
+DROP Table CPVLotQty;
 
 CPVLot_Tmp:
 NoConcatenate
@@ -4780,7 +4840,7 @@ DROP Table ComplaintTender_;
 Left Join (ComplaintTender)
 LOAD
 	IDComplaintTenderKey,
-	Floor(Max([Дата публ. файла жалобы тендера])) as [Дата публікації останнього файла скарги]
+	Date(Floor(Max([Дата публ. файла жалобы тендера]))) as [Дата публікації останнього файла скарги]
 Resident ComplaintTenderDocuments
 Group By IDComplaintTenderKey;	
 
@@ -6353,61 +6413,3 @@ STORE StartControl into StartControl.txt (txt);
 DROP Table StartControl; 
 ///$tab Exit Script
 Exit Script;
-///$tab 7 For Alerts
-// Участники без кода ЕДРПОУ
-BadTenderers:
-LOAD
-	 IDTenderer,
-	 Участник,
-	 IDTendererKey
-Resident Tenderer
-Where IDTenderer='' OR IsNull(IDTenderer) OR Num#(IDTenderer)=0 OR NOT IsNum(Num#(IDTenderer));	 
-
-Left Join (BadTenderers)
-LOAD 
-	 IDTendererKey,
-	 IDTenderKey,
-	 ДатаПредложения,
-	 СуммаПредложения
-Resident Bid;	
-
-DROP Field IDTenderKey From Bid;
-
-Left Join (BadTenderers) 
-LOAD
-	 IDTenderKey,
-	 Идентификатор
-Resident Tender; 
-
-AlertTableTenderer:
-LOAD
-	 Trim(Идентификатор)&'  '&Trim(IDTenderer)&Repeat(' ',12-Len(Trim(IDTenderer)))&Date(ДатаПредложения, 'YYYY-MM-DD hh:mm:ss')&'   '&NUM(СуммаПредложения, '# ##0,00') as TblStrTenderer
-Resident BadTenderers
-Order By Идентификатор, ДатаПредложения, СуммаПредложения;	 
-
-DROP Table BadTenderers;
-
-// Организаторы без кода ЕДРПОУ
-
-BadOrganizators:
-LOAD
-	 IDOrganizator,
-	 IDOrganizatorKey,
-	 Организатор
-Resident Organizator
-Where IDOrganizator='' OR IsNull(IDOrganizator) OR IDOrganizator=0;
-
-Left Join (BadOrganizators) 
-LOAD 
-	 IDOrganizatorKey,
-	 Идентификатор
-Resident Tender;
-
-AlertTableOrganizator:
-LOAD
-	 Trim(Идентификатор) as TblStrOrganizator
-Resident BadOrganizators
-Order By Идентификатор;	 
-
-DROP Table BadOrganizators;
-///$tab For Dev
