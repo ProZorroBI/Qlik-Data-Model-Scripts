@@ -6392,8 +6392,6 @@ none,							Не усунуто,						Not eliminated
 ];
 ///$tab 10 Параметры
 
-
-
 Параметры:
 LOAD 
 '$(vMinDate)' as НачалоПериода,
